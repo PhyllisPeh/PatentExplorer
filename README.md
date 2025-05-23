@@ -1,1 +1,1 @@
-"# PatentExplorer" 
+# PatentExplorer
