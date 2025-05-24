@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Patent Explorer</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <div class="container mx-auto px-4 py-8">
+        <h1 class="text-4xl font-bold text-center text-blue-600 mb-8">Patent Explorer</h1>
+        
+        <!-- Search Form -->
+        <div class="max-w-2xl mx-auto mb-8">
+            <form id="searchForm" class="bg-white shadow-md rounded px-8 pt-6 pb-8 mb-4">
+                <div class="mb-4">
+                    <input type="text" id="keywords" name="keywords" 
+                           class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline" 
+                           placeholder="Enter keywords to search patents...">
+                </div>
+                <div class="flex items-center justify-center">
+                    <button type="submit" 
+                            class="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline">
+                        Search Patents
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Loading Spinner -->
+        <div id="loading" class="hidden">
+            <div class="flex justify-center items-center">
+                <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500"></div>
+            </div>
+        </div>
+
+        <!-- Results Container -->
+        <div id="results" class="max-w-4xl mx-auto"></div>
+    </div>
+
+    <script>
+        $(document).ready(function() {
+            $('#searchForm').on('submit', function(e) {
+                e.preventDefault();
+                const keywords = $('#keywords').val();
+                
+                if (!keywords) {
+                    alert('Please enter search keywords');
+                    return;
+                }
+
+                // Show loading spinner
+                $('#loading').removeClass('hidden');
+                $('#results').empty();
+
+                $.ajax({
+                    url: '/search',
+                    method: 'POST',
+                    data: { keywords: keywords },
+                    success: function(response) {
+                        $('#loading').addClass('hidden');
+                        
+                        if (response.error) {
+                            $('#results').html(`<div class="text-red-500 text-center">${response.error}</div>`);
+                            return;
+                        }
+
+                        if (!response.patents.length) {
+                            $('#results').html('<div class="text-center text-gray-600">No patents found.</div>');
+                            return;
+                        }
+
+                        const resultsHtml = response.patents.map((patent, index) => `
+                            <div class="bg-white shadow-md rounded-lg p-6 mb-4">
+                                <h2 class="text-xl font-bold text-blue-600 mb-2">
+                                    <a href="${patent.link}" target="_blank" class="hover:underline">
+                                        ${patent.title}
+                                    </a>
+                                </h2>
+                                <div class="grid grid-cols-2 gap-4 mb-4 text-sm">
+                                    <div>
+                                        <span class="font-semibold">Assignee:</span> ${patent.assignee}
+                                    </div>
+                                    <div>
+                                        <span class="font-semibold">Filing Year:</span> ${patent.filing_year}
+                                    </div>
+                                </div>
+                                <div class="text-gray-600">
+                                    <span class="font-semibold">Abstract:</span><br>
+                                    ${patent.abstract}
+                                </div>
+                            </div>
+                        `).join('');
+
+                        $('#results').html(resultsHtml);
+                    },
+                    error: function() {
+                        $('#loading').addClass('hidden');
+                        $('#results').html('<div class="text-red-500 text-center">An error occurred while searching patents.</div>');
+                    }
+                });
+            });
+        });
+    </script>
+</body>
+</html> 
