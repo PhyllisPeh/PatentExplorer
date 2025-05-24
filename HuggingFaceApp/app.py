@@ -4,7 +4,7 @@ from datetime import datetime
 
 app = Flask(__name__)
 
-def search_patents(keywords, num_results=10):
+def search_patents(keywords, num_results=15):
     """
     Search patents using SerpAPI Google Patents
     """
