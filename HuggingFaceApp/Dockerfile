@@ -21,5 +21,8 @@ COPY ./templates /code/templates
 # Make port 7860 available to the world outside this container
 EXPOSE 7860
 
+# Note: The PATENTSVIEW_API_KEY environment variable must be set when running the container
+# Example: docker run -e PATENTSVIEW_API_KEY=your_api_key_here ...
+
 # Run gunicorn
 CMD ["gunicorn", "--bind", "0.0.0.0:7860", "app:app", "--timeout", "300"] 
