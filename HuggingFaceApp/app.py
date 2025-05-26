@@ -45,24 +45,11 @@ def search_patents(keywords, num_results=15):
             "X-Api-Key": PATENTSVIEW_API_KEY
         }
         
-        # Log the request details (without API key)
-        debug_headers = headers.copy()
-        debug_headers['X-Api-Key'] = '***'
-        print(f"Making API request to: {api_url}")
-        print(f"Headers: {json.dumps(debug_headers, indent=2)}")
-        print(f"Query: {json.dumps(query, indent=2)}")
-        
         response = requests.post(api_url, json=query, headers=headers)
-        
-        # Log response details
-        print(f"Response status code: {response.status_code}")
-        print(f"Response headers: {json.dumps(dict(response.headers), indent=2)}")
         
         try:
             response_data = response.json()
-            print(f"Response data: {json.dumps(response_data, indent=2)}")
         except json.JSONDecodeError:
-            print(f"Raw response text: {response.text}")
             return []
             
         response.raise_for_status()  # Raise exception for non-200 status codes
