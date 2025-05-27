@@ -21,8 +21,10 @@ COPY ./templates /code/templates
 # Make port 7860 available to the world outside this container
 EXPOSE 7860
 
-# Note: The PATENTSVIEW_API_KEY environment variable must be set when running the container
-# Example: docker run -e PATENTSVIEW_API_KEY=your_api_key_here ...
+# Required environment variables:
+# - PATENTSVIEW_API_KEY: Your PatentsView API key
+# - OPENAI_API_KEY: Your OpenAI API key
+# Example: docker run -e PATENTSVIEW_API_KEY=your_key -e OPENAI_API_KEY=your_openai_key ...
 
 # Run gunicorn
 CMD ["gunicorn", "--bind", "0.0.0.0:7860", "app:app", "--timeout", "300"] 

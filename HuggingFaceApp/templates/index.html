@@ -71,7 +71,22 @@
                             return;
                         }
 
-                        const resultsHtml = response.patents.map((patent, index) => `
+                        let resultsHtml = '';
+                        
+                        // Add summary section if available
+                        if (response.summary) {
+                            resultsHtml += `
+                                <div class="bg-blue-50 border border-blue-200 rounded-lg p-6 mb-8">
+                                    <h2 class="text-xl font-bold text-blue-800 mb-4">Summary Analysis</h2>
+                                    <div class="text-gray-700 whitespace-pre-line">
+                                        ${response.summary}
+                                    </div>
+                                </div>
+                            `;
+                        }
+
+                        // Add individual patent results
+                        resultsHtml += response.patents.map((patent, index) => `
                             <div class="bg-white shadow-md rounded-lg p-6 mb-4">
                                 <h2 class="text-xl font-bold text-blue-600 mb-2">
                                     <a href="${patent.link}" target="_blank" class="hover:underline">

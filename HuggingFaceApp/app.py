@@ -1,15 +1,26 @@
 from flask import Flask, render_template, request, jsonify
+from dotenv import load_dotenv
 import requests
 from datetime import datetime
 import os
 import json
+import openai
+
+load_dotenv()
 
 app = Flask(__name__)
 
-# Get API key from environment variable
+# Get API keys from environment variables
 PATENTSVIEW_API_KEY = os.getenv('PATENTSVIEW_API_KEY')
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+
 if not PATENTSVIEW_API_KEY:
     raise ValueError("PATENTSVIEW_API_KEY environment variable is not set")
+if not OPENAI_API_KEY:
+    raise ValueError("OPENAI_API_KEY environment variable is not set")
+
+# Initialize OpenAI API key
+openai.api_key = OPENAI_API_KEY
 
 def search_patents(keywords, num_results=15):
     """
@@ -112,6 +123,37 @@ def search_patents(keywords, num_results=15):
         print(traceback.format_exc())
         return []
 
+def generate_summary(patents):
+    """
+    Generate a summary of the patents using ChatGPT
+    """
+    if not patents:
+        return "No patents to summarize."
+    
+    # Prepare the prompt with patent information
+    prompt = "Please provide a concise summary of these patents:\n\n"
+    for patent in patents[:5]:  # Limit to first 5 patents to stay within token limits
+        prompt += f"Title: {patent['title']}\n"
+        prompt += f"Abstract: {patent['abstract']}\n"
+        prompt += f"Assignee: {patent['assignee']}\n"
+        prompt += f"Year: {patent['filing_year']}\n\n"
+    
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are a patent expert. Provide a clear and concise summary of the following patents, highlighting key innovations and common themes."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=500,
+            temperature=0.7
+        )
+        print("Finish reason:", response.choices[0].finish_reason)
+        return response.choices[0].message['content']
+    except Exception as e:
+        print(f"Error generating summary: {str(e)}")
+        return "Error generating summary."
+
 @app.route('/')
 def home():
     return render_template('index.html')
@@ -127,7 +169,13 @@ def search():
     if not patents:
         return jsonify({'error': 'No patents found or an error occurred'})
     
-    return jsonify({'patents': patents})
+    # Generate summary using ChatGPT
+    summary = generate_summary(patents)
+    
+    return jsonify({
+        'patents': patents,
+        'summary': summary
+    })
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=7860) 
