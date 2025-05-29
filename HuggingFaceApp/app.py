@@ -345,39 +345,150 @@ def create_3d_visualization(patents):
     df['y'] = embedding_3d[:, 1]
     df['z'] = embedding_3d[:, 2]
     
-    # Apply DBSCAN clustering
+    # --- Improved DBSCAN clustering logic ---
     scaler = StandardScaler()
     scaled_embeddings = scaler.fit_transform(embedding_3d)
-    dbscan = DBSCAN(eps=0.75, min_samples=5)
-    clusters = dbscan.fit_predict(scaled_embeddings)
-    
-    update_progress('analysis', 'Analyzing clusters and opportunities...')
-    
-    # Print clustering statistics
-    n_clusters = len(set(clusters)) - (1 if -1 in clusters else 0)
-    n_noise = list(clusters).count(-1)
-    print(f"\nClustering Statistics:")
-    print(f"Number of clusters: {n_clusters}")
-    print(f"Number of patents in sparse regions: {n_noise}")
-    print(f"Total number of patents: {len(clusters)}")
-    
-    if n_noise == 0:
-        print("\nWarning: No sparse regions detected. Consider adjusting DBSCAN parameters.")
-        dbscan = DBSCAN(eps=0.5, min_samples=7)
+    # Initial DBSCAN parameters
+    eps = 0.75
+    min_samples = 5
+    max_retries = 3
+    max_clusters = 10  # Cap on number of clusters for AI summary
+    retry = 0
+    clusters = None
+    n_clusters = 0
+    n_noise = 0
+
+    while retry < max_retries:
+        print(f"DBSCAN try {retry+1}: eps={eps}, min_samples={min_samples}")
+        dbscan = DBSCAN(eps=eps, min_samples=min_samples)
         clusters = dbscan.fit_predict(scaled_embeddings)
         n_clusters = len(set(clusters)) - (1 if -1 in clusters else 0)
         n_noise = list(clusters).count(-1)
-        print(f"\nRetrying with stricter parameters:")
+        print(f"\nClustering Statistics (try {retry+1}):")
         print(f"Number of clusters: {n_clusters}")
         print(f"Number of patents in sparse regions: {n_noise}")
-    
+        print(f"Total number of patents: {len(clusters)}")
+        # If too many clusters, merge by relaxing parameters
+        if n_clusters > max_clusters:
+            print("Too many clusters, relaxing DBSCAN parameters...")
+            eps += 0.25  # Increase eps to merge clusters
+            min_samples += 2
+            retry += 1
+            continue
+        # If no sparse regions, retry with stricter parameters
+        if n_noise == 0:
+            print("No sparse regions detected, tightening DBSCAN parameters...")
+            eps -= 0.4  # More aggressive reduction
+            min_samples += 4  # More aggressive increase
+            retry += 1
+            continue
+        # Acceptable clustering found
+        break
+    else:
+        # If after retries, still too many clusters or no sparse regions, accept last result
+        print("Max retries reached. Proceeding with last clustering result.")
+
     df['cluster'] = clusters
-    
+
     update_progress('analysis', 'Generating cluster insights...')
-    
-    # Generate cluster insights
-    cluster_insights = analyze_clusters(df, clusters, embedding_3d)
-    
+
+    # --- Limit AI cost: summarize only largest clusters ---
+    # Only summarize up to max_clusters largest clusters, skip small clusters
+    cluster_sizes = df[df['cluster'] != -1]['cluster'].value_counts()
+    top_clusters = cluster_sizes.nlargest(max_clusters).index.tolist()
+    # Mark clusters to summarize
+    df['summarize'] = df['cluster'].apply(lambda x: int(x) in [int(c) for c in top_clusters] or x == -1)
+
+    def analyze_clusters_limited(df, labels, embeddings_3d):
+        unique_labels = np.unique(labels)
+        cluster_insights = []
+        # Only summarize top clusters and opportunity zones
+        for label in unique_labels:
+            if label != -1 and int(label) not in [int(c) for c in top_clusters]:
+                continue  # Skip small clusters
+            cluster_mask = labels == label
+            cluster_patents = df[cluster_mask]
+            cluster_points = embeddings_3d[cluster_mask]
+            if label == -1:
+                if len(cluster_patents) > 0:
+                    titles = "\n".join(cluster_patents['title'].tolist())
+                    assignees = ", ".join(cluster_patents['assignee'].unique())
+                    years = f"{cluster_patents['year'].min()} - {cluster_patents['year'].max()}"
+                    prompt = f"""Analyze these {len(cluster_patents)} patents that are in sparse regions of the technology landscape:
+
+Patents:
+{titles}
+
+Key assignees: {assignees}
+Years: {years}
+
+Please provide:
+1. A brief description of these isolated technologies
+2. Potential innovation opportunities in this space
+3. Why these areas might be underexplored
+Keep the response concise (max 3 sentences per point)."""
+                    try:
+                        response = openai.ChatCompletion.create(
+                            model="gpt-3.5-turbo",
+                            messages=[
+                                {"role": "system", "content": "You are a patent and technology expert analyzing innovation opportunities."},
+                                {"role": "user", "content": prompt}
+                            ],
+                            max_tokens=300,
+                            temperature=0.7
+                        )
+                        cluster_insights.append({
+                            'type': 'opportunity_zone',
+                            'size': len(cluster_patents),
+                            'description': response['choices'][0]['message']['content']
+                        })
+                    except Exception as e:
+                        print(f"Error generating opportunity zone analysis: {e}")
+            else:
+                if len(cluster_patents) > 0:
+                    titles = "\n".join(cluster_patents['title'].tolist())
+                    assignees = ", ".join(cluster_patents['assignee'].unique())
+                    years = f"{cluster_patents['year'].min()} - {cluster_patents['year'].max()}"
+                    prompt = f"""Analyze this cluster of {len(cluster_patents)} related patents:
+
+Patents:
+{titles}
+
+Key assignees: {assignees}
+Years: {years}
+
+Please provide a concise (2-3 sentences) summary of:
+1. The main technology focus of this cluster
+2. Current development status and trends"""
+                    try:
+                        response = openai.ChatCompletion.create(
+                            model="gpt-3.5-turbo",
+                            messages=[
+                                {"role": "system", "content": "You are a patent and technology expert analyzing innovation clusters."},
+                                {"role": "user", "content": prompt}
+                            ],
+                            max_tokens=200,
+                            temperature=0.7
+                        )
+                        cluster_insights.append({
+                            'type': 'cluster',
+                            'id': int(label),
+                            'size': len(cluster_patents),
+                            'description': response['choices'][0]['message']['content']
+                        })
+                    except Exception as e:
+                        print(f"Error generating cluster analysis: {e}")
+        if not any(l == -1 for l in unique_labels):
+            cluster_insights.append({
+                'type': 'opportunity_zone',
+                'size': 0,
+                'description': "No sparse regions (opportunity zones) were detected in this search."
+            })
+        return cluster_insights
+
+    # Use the limited cluster analysis
+    cluster_insights = analyze_clusters_limited(df, clusters, embedding_3d)
+
     update_progress('visualization', 'Creating interactive plot...')
     
     # Create hover text with cluster information
@@ -533,4 +644,4 @@ def search():
         return jsonify({'error': str(e)})
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=7860) 
+    app.run(host='0.0.0.0', port=7860)

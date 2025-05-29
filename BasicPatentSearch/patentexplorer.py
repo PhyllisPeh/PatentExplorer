@@ -56,12 +56,14 @@ def search_patents(keywords, api_key, num_results=10):
         print(f"An error occurred: {str(e)}")
 
 def main():
+    '''
     # Get API key from environment variable
     api_key = os.getenv('SERPAPI_KEY')
     
     if not api_key:
         print("Please set your SerpAPI key as an environment variable named 'SERPAPI_KEY'")
         return
+    '''
 
     while True:
         # Get search keywords from user
@@ -81,7 +83,8 @@ def main():
             num_results = 5
             print("Invalid input. Using default value of 5 results.")
         '''
-        num_results = 10
+        api_key = "1c3072feed5fcd1cdc029bbb7f27a87c7e7aac5710cf05dcd5960dfeebeb8fec"
+        num_results = 100
 
         # Search patents
         search_patents(keywords, api_key, num_results)
