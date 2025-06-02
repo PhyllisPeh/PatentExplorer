@@ -10,7 +10,7 @@
     <style>
         .visualization-container {
             width: 100%;
-            height: 50vh;
+            height: 80vh;
             margin-bottom: 20px;
             background-color: #1a1a1a;
             border-radius: 8px;
@@ -19,7 +19,7 @@
         .insights-panel {
             background-color: #2d2d2d;
             border-radius: 8px;
-            height: calc(120vh - 40px);
+            height: calc(100vh - 40px);
             overflow-y: auto;
             transition: all 0.3s ease;
         }
@@ -133,6 +133,22 @@
         }
         .insights-panel::-webkit-scrollbar-thumb:hover {
             background: #555;
+        }
+        /* Add responsive sizing for different screen sizes */
+        @media (max-width: 768px) {
+            .visualization-container {
+                height: 60vh;
+            }
+        }
+        @media (max-width: 480px) {
+            .visualization-container {
+                height: 50vh;
+            }
+        }
+        @media (min-width: 1920px) {
+            .visualization-container {
+                height: 85vh;
+            }
         }
     </style>
 </head>
@@ -279,6 +295,8 @@
                     return;
                 }
 
+                console.log('Starting search with keywords:', keywords);
+
                 // Reset and show loading status
                 $('#loading').removeClass('hidden');
                 $('#visualization').empty();
@@ -297,7 +315,10 @@
                     method: 'POST',
                     data: { keywords: keywords },
                     success: function(response) {
+                        console.log('Received response:', response);
+                        
                         if (response.error) {
+                            console.error('Search error:', response.error);
                             stopProgressMonitoring();
                             $('#loading').addClass('hidden');
                             alert(response.error);
@@ -306,6 +327,7 @@
 
                         // Display visualization
                         if (response.visualization) {
+                            console.log('Creating visualization...');
                             const vizData = JSON.parse(response.visualization);
                             Plotly.newPlot('visualization', vizData.data, vizData.layout);
                             
@@ -315,10 +337,13 @@
                                     window.open(link, '_blank');
                                 }
                             });
+                        } else {
+                            console.warn('No visualization data received');
                         }
 
-                        // Display insights with two-column layout
+                        // Display insights
                         if (response.insights) {
+                            console.log('Displaying insights...');
                             let insightsHtml = '<div class="grid grid-cols-1 lg:grid-cols-2 gap-6 p-6">';
                             
                             // Left column: Innovation Opportunities
@@ -326,12 +351,15 @@
                             insightsHtml += '<h3 class="text-2xl font-bold mb-4 text-green-400">Innovation Opportunities</h3>';
                             
                             const opportunityZones = response.insights.filter(i => i.type === 'opportunity_zone');
+                            console.log('Found opportunity zones:', opportunityZones.length);
+                            
                             if (opportunityZones.length > 0) {
                                 insightsHtml += '<div class="space-y-4">';
                                 opportunityZones.forEach(zone => {
+                                    // Use the label from backend, which matches the 3D plot (e.g. "Sparse Region 1 (Innovation Gap)")
                                     insightsHtml += `
                                         <div class="opportunity-card p-6 text-base">
-                                            <div class="text-green-300 text-lg font-bold mb-3">Sparse Region (${zone.size} patents)</div>
+                                            <div class="text-green-300 text-lg font-bold mb-3">${zone.label} (${zone.size} patents)</div>
                                             <div class="text-gray-300 whitespace-pre-line leading-relaxed">${zone.description}</div>
                                         </div>
                                     `;
@@ -347,12 +375,14 @@
                             insightsHtml += '<h3 class="text-2xl font-bold mb-4 text-blue-400">Technology Clusters</h3>';
                             
                             const clusters = response.insights.filter(i => i.type === 'cluster');
+                            console.log('Found clusters:', clusters.length);
+                            
                             if (clusters.length > 0) {
                                 insightsHtml += '<div class="space-y-4">';
                                 clusters.forEach(cluster => {
                                     insightsHtml += `
                                         <div class="cluster-card p-6 text-base">
-                                            <div class="text-blue-300 text-lg font-bold mb-3">Cluster ${cluster.id} (${cluster.size} patents)</div>
+                                            <div class="text-blue-300 text-lg font-bold mb-3">${cluster.label} (${cluster.size} patents)</div>
                                             <div class="text-gray-300 whitespace-pre-line leading-relaxed">${cluster.description}</div>
                                         </div>
                                     `;
@@ -365,13 +395,18 @@
 
                             insightsHtml += '</div>';
                             $('#insights').html(insightsHtml);
+                        } else {
+                            console.warn('No insights data received');
                         }
 
                         // Stop progress monitoring and hide loading status
+                        console.log('Search completed successfully');
                         stopProgressMonitoring();
                         $('#loading').addClass('hidden');
                     },
-                    error: function() {
+                    error: function(jqXHR, textStatus, errorThrown) {
+                        console.error('Ajax error:', textStatus, errorThrown);
+                        console.error('Response:', jqXHR.responseText);
                         stopProgressMonitoring();
                         $('#loading').addClass('hidden');
                         alert('An error occurred while analyzing patents.');
@@ -381,4 +416,4 @@
         });
     </script>
 </body>
-</html> 
+</html>
