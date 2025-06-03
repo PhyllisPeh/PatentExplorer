@@ -27,7 +27,8 @@ app = Flask(__name__)
 # Get API keys from environment variables
 SERPAPI_API_KEY = os.getenv('SERPAPI_API_KEY')
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
-MAX_PATENTS = 1000  # Limit number of patents to process
+MAX_PATENTS = 3000  # Increased from 2000 to 5000 for better coverage
+MIN_PATENTS_FOR_GAPS = 3000  # Minimum patents needed for reliable gap detection
 CACHE_FILE = 'patent_embeddings_cache.pkl'
 
 # Global progress queue for SSE updates
@@ -178,127 +179,69 @@ def search_patents(keywords, page_size=100):
     print(f"Total patents retrieved and embedded: {len(all_patents)}")
     return all_patents
 
-def generate_summary(patents):
+def analyze_patent_group(patents, group_type, label):
     """
-    Generate a summary of the patents using ChatGPT
+    Analyze a group of patents using ChatGPT.
+    group_type: 'cluster', 'innovation_subcluster', 'transitional'
     """
-    if not patents:
-        return "No patents to summarize."
+    titles = "; ".join(patents['title'].tolist()[:3])  # Show top 3 titles
+    assignees = ", ".join(patents['assignee'].unique())
+    years = f"{patents['year'].min()} - {patents['year'].max()}"
     
-    # Prepare the prompt with patent information
-    prompt = "Please provide a concise summary of these patents:\n\n"
-    for patent in patents[:5]:  # Limit to first 5 patents to stay within token limits
-        prompt += f"Title: {patent['title']}\n"
-        prompt += f"Abstract: {patent['abstract']}\n"
-        prompt += f"Assignee: {patent['assignee']}\n"
-        prompt += f"Year: {patent['filing_year']}\n\n"
+    if group_type == 'cluster':
+        prompt = f"""Technology Cluster Analysis
+
+Titles: {titles}
+Assignees: {assignees}
+Years: {years}
+
+Please provide a focused analysis of this technology cluster:
+1. Technology focus: What specific technology area do these patents represent? (1-2 short sentences)
+2. Current trend: What development trends are visible in this cluster? (1-2 short sentences)
+3. Distinctive keywords: What technical terms are unique to this cluster and differentiate it from others? List 4-6 keywords that characterize this specific technology area."""
+        
+        system_prompt = "You are a patent expert analyzing technology clusters. Focus on what makes this cluster unique and its current development trends."
+    elif group_type == 'transitional':
+        prompt = f"""Transitional Area Analysis
+
+Titles: {titles}
+Assignees: {assignees}
+Years: {years}
+
+Please provide a focused analysis of this transitional technology area:
+1. Technology focus: What specific technology area do these patents represent? (1-2 short sentences)
+2. Emerging trends: What potential new technology directions or cross-domain applications are suggested? (1-2 short sentences)
+3. Bridge concepts: What technical terms suggest connections between established technology areas? List 4-6 keywords that highlight potential technology convergence."""
+        
+        system_prompt = "You are a patent expert analyzing transitional technology areas. Focus on identifying emerging trends and potential technology convergence points."
+    else:  # innovation_subcluster
+        prompt = f"""Innovation Gap Analysis
+
+Titles: {titles}
+Assignees: {assignees}
+Years: {years}
+
+Please provide a focused analysis of this innovation opportunity:
+1. Technology focus: What specific technology area do these patents represent? (1-2 short sentences)
+2. Innovation potential: What unique opportunities exist in this specific area? (1-2 short sentences)
+3. Distinctive keywords: What technical terms highlight the innovation potential? List 4-6 keywords that characterize this opportunity area."""
+        
+        system_prompt = "You are a patent expert analyzing innovation opportunities. Focus on what makes this area unique and its specific innovation potential."
     
     try:
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": "You are a patent expert. Provide a clear and concise summary of the following patents, highlighting key innovations and common themes."},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=500,
-            temperature=0.7
+            max_tokens=200,
+            temperature=0.4
         )
-        print("Finish reason:", response.choices[0].finish_reason)
-        return response.choices[0].message['content']
+        return response.choices[0]['message']['content']
     except Exception as e:
-        print(f"Error generating summary: {str(e)}")
-        return "Error generating summary."
-
-def analyze_clusters(df, labels, embeddings_3d):
-    """
-    Generate descriptions for patent clusters and identify opportunity zones
-    """
-    unique_labels = np.unique(labels)
-    cluster_insights = []
-    
-    # Analyze each cluster (including noise points labeled as -1)
-    for label in unique_labels:
-        cluster_mask = labels == label
-        cluster_patents = df[cluster_mask]
-        cluster_points = embeddings_3d[cluster_mask]
-        
-        if label == -1:
-            # Analyze sparse regions (potential opportunity zones)
-            if len(cluster_patents) > 0:
-                titles = "\n".join(cluster_patents['title'].tolist())
-                assignees = ", ".join(cluster_patents['assignee'].unique())
-                years = f"{cluster_patents['year'].min()} - {cluster_patents['year'].max()}"
-                
-                prompt = f"""Analyze these {len(cluster_patents)} patents that are in sparse regions of the technology landscape:
-
-Patents:
-{titles}
-
-Key assignees: {assignees}
-Years: {years}
-
-Please provide:
-1. A brief description of these isolated technologies
-2. Potential innovation opportunities in this space
-3. Why these areas might be underexplored
-Keep the response concise (max 3 sentences per point)."""
-
-                try:
-                    response = openai.ChatCompletion.create(
-                        model="gpt-3.5-turbo",
-                        messages=[
-                            {"role": "system", "content": "You are a patent and technology expert analyzing innovation opportunities."},
-                            {"role": "user", "content": prompt}
-                        ],
-                        max_tokens=300,
-                        temperature=0.7
-                    )
-                    cluster_insights.append({
-                        'type': 'opportunity_zone',
-                        'size': len(cluster_patents),
-                        'description': response['choices'][0]['message']['content']
-                    })
-                except Exception as e:
-                    print(f"Error generating opportunity zone analysis: {e}")
-        else:
-            # Analyze regular clusters
-            if len(cluster_patents) > 0:
-                titles = "\n".join(cluster_patents['title'].tolist())
-                assignees = ", ".join(cluster_patents['assignee'].unique())
-                years = f"{cluster_patents['year'].min()} - {cluster_patents['year'].max()}"
-                
-                prompt = f"""Analyze this cluster of {len(cluster_patents)} related patents:
-
-Patents:
-{titles}
-
-Key assignees: {assignees}
-Years: {years}
-
-Please provide a concise (2-3 sentences) summary of:
-1. The main technology focus of this cluster
-2. Current development status and trends"""
-
-                try:
-                    response = openai.ChatCompletion.create(
-                        model="gpt-3.5-turbo",
-                        messages=[
-                            {"role": "system", "content": "You are a patent and technology expert analyzing innovation clusters."},
-                            {"role": "user", "content": prompt}
-                        ],
-                        max_tokens=200,
-                        temperature=0.7
-                    )
-                    cluster_insights.append({
-                        'type': 'cluster',
-                        'id': int(label),
-                        'size': len(cluster_patents),
-                        'description': response['choices'][0]['message']['content']
-                    })
-                except Exception as e:
-                    print(f"Error generating cluster analysis: {e}")
-    
-    return cluster_insights
+        print(f"Error generating analysis: {e}")
+        return "Analysis generation failed."
 
 def create_3d_visualization(patents):
     """
@@ -312,6 +255,7 @@ def create_3d_visualization(patents):
     # Extract embeddings and metadata
     embeddings = []
     metadata = []
+    
     for patent in patents:
         if patent['embedding'] is not None:
             embeddings.append(patent['embedding'])
@@ -329,6 +273,15 @@ def create_3d_visualization(patents):
     
     if not embeddings:
         return None
+        
+    # Check if we have enough patents for reliable gap detection
+    if len(embeddings) < MIN_PATENTS_FOR_GAPS:
+        print(f"\nWarning: Dataset size ({len(embeddings)} patents) is below recommended minimum ({MIN_PATENTS_FOR_GAPS})")
+        print("Innovation gap detection may be less reliable with smaller datasets")
+        print("Consider:")
+        print("1. Broadening your search terms")
+        print("2. Including more patent categories")
+        print("3. Expanding the time range")
         
     # Convert embeddings to numpy array
     embeddings_array = np.array(embeddings)
@@ -390,6 +343,7 @@ def create_3d_visualization(patents):
         print(f"Number of clusters: {n_clusters}")
         print(f"Number of patents in sparse regions: {n_noise}")
         print(f"Total number of patents: {len(clusters)}")
+        
         # If too many clusters, merge by increasing min_cluster_size
         if n_clusters > max_clusters:
             print("Too many clusters, increasing min_cluster_size...")
@@ -411,242 +365,274 @@ def create_3d_visualization(patents):
 
     df['cluster'] = clusters
 
-    # --- Further cluster the noise points to find multiple sparse regions ---
+    # --- First gather all existing clusters and their sizes ---
+    cluster_info = []
+    for label in set(clusters):
+        if label != -1:  # Skip noise points
+            cluster_mask = clusters == label
+            cluster_patents = df[cluster_mask]
+            if len(cluster_patents) > 0:
+                cluster_info.append((label, len(cluster_patents), cluster_patents))
+    
+    # Sort clusters by size in descending order
+    cluster_info.sort(key=lambda x: x[1], reverse=True)
+    
+    print("\nCluster Size Distribution:")
+    for i, (label, size, _) in enumerate(cluster_info):
+        print(f"Cluster {i} (originally {label}): {size} patents")
+    
+    # Create mapping for new cluster IDs
+    cluster_id_map = {old_label: i for i, (old_label, _, _) in enumerate(cluster_info)}
+    
+    # Update cluster IDs in DataFrame
+    new_clusters = clusters.copy()
+    for old_label, new_label in cluster_id_map.items():
+        new_clusters[clusters == old_label] = new_label
+    df['cluster'] = new_clusters
+    
+    # --- Analyze clusters ---
+    cluster_insights = []  # Initialize insights list
+    
+    # First analyze main clusters with new IDs
+    for new_id, (_, size, cluster_patents) in enumerate(cluster_info):
+        description = analyze_patent_group(cluster_patents, 'cluster', new_id)
+        cluster_insights.append({
+            'type': 'cluster',
+            'id': int(new_id),
+            'size': size,
+            'label': f"Cluster {new_id}",
+            'description': description
+        })
+
+    # --- Improved two-stage density analysis for noise points ---
     noise_mask = df['cluster'] == -1
     noise_points = scaled_embeddings[noise_mask]
     noise_indices = df[noise_mask].index
-    noise_labels = None
-    n_sparse_regions = 0
-
-    # Improved: Use HDBSCAN on noise points to find dense subclusters, and only treat truly scattered points as sparse regions
-    sparse_region_labels = {}
-    promoted_cluster_labels = {}  # New dictionary for promoted cluster labels
-    if len(noise_points) > 0:
-        # Calculate remaining cluster budget and target noise
-        current_clusters = len(set(clusters)) - (1 if -1 in clusters else 0)
-        remaining_cluster_budget = max_clusters - current_clusters
+    
+    if len(noise_points) >= 3:
+        print(f"\nStructural Analysis for Innovation Gap Detection:")
         
-        # First, analyze the density and relationships of noise points
-        n_neighbors = min(5, len(noise_points) - 1)  # Use 5 neighbors or all points minus one
-        nbrs = NearestNeighbors(n_neighbors=n_neighbors, metric='euclidean').fit(noise_points)
-        distances, _ = nbrs.kneighbors(noise_points)
-        avg_distances = np.mean(distances, axis=1)
+        # Stage 1: Calculate local and global density metrics
+        n_neighbors = min(max(5, int(len(noise_points) * 0.05)), 15)
+        print(f"Using {n_neighbors} nearest neighbors for density calculation")
         
-        # Calculate density threshold using the mean distance to neighbors
-        mean_distance = np.mean(avg_distances)
-        std_distance = np.std(avg_distances)
-        density_threshold = mean_distance + std_distance
+        # Calculate local density for noise points
+        nbrs_local = NearestNeighbors(n_neighbors=n_neighbors, metric='euclidean').fit(noise_points)
+        local_distances, local_indices = nbrs_local.kneighbors(noise_points)
+        local_densities = 1 / (np.mean(local_distances, axis=1) + 1e-6)  # Add small epsilon to avoid division by zero
         
-        # Identify true sparse points (points with high average distance to neighbors)
-        sparse_mask = avg_distances > density_threshold
-        true_sparse_indices = [idx for i, idx in enumerate(noise_indices) if sparse_mask[i]]
-        dense_noise_indices = [idx for i, idx in enumerate(noise_indices) if not sparse_mask[i]]
-        
-        print(f"\nDensity Analysis of Noise Points:")
-        print(f"Total noise points: {len(noise_points)}")
-        print(f"Average distance between points: {mean_distance:.3f}")
-        print(f"Density threshold: {density_threshold:.3f}")
-        print(f"True sparse points: {len(true_sparse_indices)}")
-        print(f"Dense noise points: {len(dense_noise_indices)}")
-        
-        # If we have dense noise points, try to form subclusters
-        if len(dense_noise_indices) > 0:
-            dense_noise_points = scaled_embeddings[dense_noise_indices]
+        # Calculate distances to cluster centers and their densities
+        cluster_centers = []
+        cluster_densities = []  # Store density of each cluster
+        for label in set(clusters) - {-1}:
+            cluster_mask = clusters == label
+            cluster_points = scaled_embeddings[cluster_mask]
+            center = np.mean(cluster_points, axis=0)
+            cluster_centers.append(center)
             
-            # Use more aggressive clustering for dense noise points
-            subcluster_min_size = max(3, len(dense_noise_points) // 10)  # At least 10% of dense noise points
-            hdb_noise = hdbscan.HDBSCAN(
-                min_cluster_size=subcluster_min_size,
-                min_samples=max(3, subcluster_min_size // 2),
-                cluster_selection_epsilon=0.3,
-                cluster_selection_method='leaf'
-            )
-            dense_noise_labels = hdb_noise.fit_predict(dense_noise_points)
+            # Calculate cluster density using its member points
+            if len(cluster_points) > 1:
+                nbrs_cluster = NearestNeighbors(n_neighbors=min(5, len(cluster_points))).fit(cluster_points)
+                cluster_dists, _ = nbrs_cluster.kneighbors(cluster_points)
+                cluster_density = 1 / (np.mean(cluster_dists) + 1e-6)
+            else:
+                cluster_density = 0
+            cluster_densities.append(cluster_density)
+        
+        cluster_centers = np.array(cluster_centers)
+        cluster_densities = np.array(cluster_densities)
+        
+        if len(cluster_centers) > 0:
+            # Calculate distances and density ratios to nearest clusters
+            nbrs_clusters = NearestNeighbors(n_neighbors=1, metric='euclidean').fit(cluster_centers)
+            cluster_distances, nearest_cluster_indices = nbrs_clusters.kneighbors(noise_points)
+            cluster_distances = cluster_distances.flatten()
             
-            # Promote dense subclusters
-            next_cluster_id = df['cluster'].max() + 1
-            dense_noise_label_map = {}
-            promoted_clusters = 0
+            # Get density of nearest cluster for each point
+            nearest_cluster_densities = cluster_densities[nearest_cluster_indices.flatten()]
             
-            for i, idx in enumerate(dense_noise_indices):
-                if dense_noise_labels[i] != -1 and promoted_clusters < remaining_cluster_budget:
-                    dense_label = int(dense_noise_labels[i])
-                    if dense_label not in dense_noise_label_map:
-                        if promoted_clusters >= remaining_cluster_budget:
-                            continue
-                        dense_noise_label_map[dense_label] = next_cluster_id + len(dense_noise_label_map)
-                        promoted_clusters += 1
-                    new_cluster_id = dense_noise_label_map[dense_label]
-                    df.at[idx, 'cluster'] = new_cluster_id
-                    promoted_cluster_labels[new_cluster_id] = f"Cluster {new_cluster_id}"
-        
-        # Mark true sparse points
-        for idx in true_sparse_indices:
-            df.at[idx, 'cluster'] = -1
+            # Calculate density ratios (local density / nearest cluster density)
+            density_ratios = local_densities / (nearest_cluster_densities + 1e-6)
             
-        # Update clusters array to match DataFrame for visualization
-        clusters = df['cluster'].values
+            print("\nDensity Analysis Statistics:")
+            print(f"Mean local density: {np.mean(local_densities):.3f}")
+            print(f"Mean cluster density: {np.mean(cluster_densities):.3f}")
+            print(f"Mean density ratio: {np.mean(density_ratios):.3f}")
+            
+            # Identify structural gaps using multiple criteria
+            # 1. Density Isolation: Points with very low density compared to clusters
+            # 2. Spatial Isolation: Points far from both clusters and other noise points
+            # 3. Structural Stability: Points whose local neighborhood is also sparse
+            
+            # Calculate isolation scores
+            density_isolation = density_ratios < 0.3  # Point density is less than 30% of nearest cluster
+            spatial_isolation = cluster_distances > np.percentile(cluster_distances, 75)
+            
+            # Calculate structural stability
+            # Check if neighboring points are also sparse
+            structural_stability = np.zeros(len(noise_points), dtype=bool)
+            for i, neighbors in enumerate(local_indices):
+                neighbor_densities = local_densities[neighbors]
+                # Point is stable if most neighbors are also sparse
+                structural_stability[i] = np.mean(neighbor_densities) < np.percentile(local_densities, 25)
+            
+            # Combine criteria with weights
+            true_sparse_indices = [
+                idx for i, idx in enumerate(noise_indices)
+                if (density_isolation[i] and spatial_isolation[i]) or  # Clear isolation
+                   (density_isolation[i] and structural_stability[i]) or  # Stable sparse region
+                   (spatial_isolation[i] and structural_stability[i])  # Stable distant region
+            ]
+            
+            dense_noise_indices = [idx for idx in noise_indices if idx not in true_sparse_indices]
+            
+            # Print detailed analysis
+            print("\nInnovation Gap Analysis:")
+            print(f"Points with density isolation: {np.sum(density_isolation)}")
+            print(f"Points with spatial isolation: {np.sum(spatial_isolation)}")
+            print(f"Points with structural stability: {np.sum(structural_stability)}")
+        else:
+            # Fallback using only local density analysis
+            density_threshold = np.percentile(local_densities, 25)  # Bottom 25% sparsest points
+            true_sparse_indices = [idx for i, idx in enumerate(noise_indices) 
+                                 if local_densities[i] < density_threshold]
+            dense_noise_indices = [idx for idx in noise_indices if idx not in true_sparse_indices]
         
-        # Count final sparse points
-        truly_sparse_count = len(true_sparse_indices)
+        print(f"\nFinal Classification:")
+        print(f"True innovation gaps identified: {len(true_sparse_indices)}")
+        print(f"Transitional areas identified: {len(dense_noise_indices)}")
+        if len(true_sparse_indices) > 0:
+            print(f"Innovation gap ratio: {len(true_sparse_indices)/len(noise_points):.2%}")
+            print("\nInnovation Gap Criteria Used:")
+            print("1. Density Isolation: Significantly lower density than nearest cluster")
+            print("2. Spatial Isolation: Far from both clusters and other points")
+            print("3. Structural Stability: Forms stable sparse regions with neighbors")
         
-        print(f"\nFinal Clustering Results:")
-        print(f"Promoted {promoted_clusters if 'promoted_clusters' in locals() else 0} dense subclusters to clusters")
-        print(f"Identified {truly_sparse_count} true innovation gaps")
-        print(f"Total clusters: {len(set(clusters)) - (1 if -1 in clusters else 0)}")
+        # Mark points in DataFrame
+        df['point_type'] = 'cluster'  # Default type
+        df.loc[true_sparse_indices, 'point_type'] = 'sparse'
+        df.loc[dense_noise_indices, 'point_type'] = 'dense_noise'
+    
+    # --- Handle dense noise points as transitional areas ---
+    if len(dense_noise_indices) >= 3:
+        print("\nAnalyzing dense noise points as transitional areas...")
+        dense_noise_points = scaled_embeddings[dense_noise_indices]
         
-        # If we found no true sparse regions, add a note about it
-        if truly_sparse_count == 0:
-            print("\nNote: No significant innovation gaps detected in this technology space.")
-            print("This suggests a well-developed technology area with good patent coverage.")
+        # Use HDBSCAN to find subgroups within transitional areas
+        min_size = max(3, len(dense_noise_points) // 10)
+        print(f"Attempting to identify transitional area subgroups with min_size={min_size}")
         
-        # Update n_noise to reflect only truly sparse points
-        n_noise = truly_sparse_count
-
-    update_progress('analysis', 'Generating cluster insights...')
-
-    # --- Limit AI cost: summarize only largest clusters and sparse regions ---
-    cluster_sizes = df[df['cluster'] != -1]['cluster'].value_counts()
-    top_clusters = cluster_sizes.nlargest(max_clusters).index.tolist()
-    df['summarize'] = df['cluster'].apply(lambda x: int(x) in [int(c) for c in top_clusters] or x not in top_clusters)
-
-    def analyze_clusters_limited(df, labels, embeddings_3d):
-        unique_labels = np.unique(labels)
-        cluster_insights = []
-
-        # Gather all clusters and their sizes (excluding -1 and sparse regions for now)
-        cluster_info_list = []
-        for label in unique_labels:
-            if label == -1 or (label in sparse_region_labels):
-                continue
-            cluster_mask = labels == label
-            cluster_patents = df[cluster_mask]
-            if len(cluster_patents) > 0:
-                cluster_info_list.append((label, len(cluster_patents), cluster_patents))
-
-        # Sort clusters by size descending
-        cluster_info_list.sort(key=lambda x: x[1], reverse=True)
-
-        # Add sorted clusters to insights
-        for label, size, cluster_patents in cluster_info_list:
-            titles = "; ".join(cluster_patents['title'].tolist()[:2])
-            assignees = ", ".join(cluster_patents['assignee'].unique())
-            years = f"{cluster_patents['year'].min()} - {cluster_patents['year'].max()}"
-            prompt = f"""Cluster {label}
-
-Titles: {titles}
-Assignees: {assignees}
-Years: {years}
-
-- Main: What is the main technology focus? (1-2 short sentences)
-- Trend: What is the current trend? (1-2 short sentences)
-"""
-            try:
-                response = openai.ChatCompletion.create(
-                    model="gpt-3.5-turbo",
-                    messages=[
-                        {"role": "system", "content": "You are a patent expert. For each cluster, answer with two clear, short sentences: one for the main technology, one for the trend."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    max_tokens=80,
-                    temperature=0.4
-                )
+        hdb_dense = hdbscan.HDBSCAN(
+            min_cluster_size=min_size,
+            min_samples=max(2, min_size // 2),
+            cluster_selection_epsilon=0.3,
+            cluster_selection_method='leaf'
+        )
+        dense_labels = hdb_dense.fit_predict(dense_noise_points)
+        
+        # Count potential transitional areas
+        unique_dense_labels = set(dense_labels) - {-1}
+        n_transitional = len(unique_dense_labels)
+        print(f"Found {n_transitional} distinct transitional areas")
+        
+        # Analyze each transitional area
+        for dense_label in unique_dense_labels:
+            dense_mask = dense_labels == dense_label
+            area_indices = [dense_noise_indices[i] for i, is_member in enumerate(dense_mask) if is_member]
+            
+            if len(area_indices) >= min_size:
+                area_patents = df.iloc[area_indices]
+                description = analyze_patent_group(area_patents, 'transitional', dense_label)
                 cluster_insights.append({
-                    'type': 'cluster',
-                    'id': int(label),
-                    'size': size,
-                    'label': f"Cluster {label}",
-                    'description': response['choices'][0]['message']['content']
+                    'type': 'transitional',
+                    'id': int(dense_label),
+                    'size': len(area_indices),
+                    'label': f"Transitional Area {dense_label + 1}",
+                    'description': description
                 })
-            except Exception as e:
-                print(f"Error generating cluster analysis: {e}")
-
-        # Now handle sparse regions (label == -1 and subclusters)
-        for label in unique_labels:
-            cluster_mask = labels == label
-            cluster_patents = df[cluster_mask]
-            is_sparse_region = False
-            sparse_label = None
-            if label == -1:
-                if len(cluster_patents) == 0:
-                    continue
-                is_sparse_region = True
-                sparse_label = "Sparse Region (Innovation Gap)"
-            elif label in sparse_region_labels:
-                is_sparse_region = True
-                sparse_label = f"{sparse_region_labels[label]} (Innovation Gap)"
-
-            if is_sparse_region and len(cluster_patents) > 0:
-                titles = "; ".join(cluster_patents['title'].tolist()[:2])
-                assignees = ", ".join(cluster_patents['assignee'].unique())
-                years = f"{cluster_patents['year'].min()} - {cluster_patents['year'].max()}"
-                prompt = f"""{sparse_label}
-
-Titles: {titles}
-Assignees: {assignees}
-Years: {years}
-
-- Main: What is the main technology here? (1-2 short sentences)
-- Opportunity: What is a possible innovation opportunity? (1-2 short sentences)
-"""
-                try:
-                    response = openai.ChatCompletion.create(
-                        model="gpt-3.5-turbo",
-                        messages=[
-                            {"role": "system", "content": "You are a patent expert. For each region, answer with two clear, short sentences: one for the main technology, one for the opportunity. Use the region label as the heading."},
-                            {"role": "user", "content": prompt}
-                        ],
-                        max_tokens=80,
-                        temperature=0.4
-                    )
-                    cluster_insights.append({
-                        'type': 'opportunity_zone',
-                        'id': int(label),
-                        'size': len(cluster_patents),
-                        'label': sparse_label,
-                        'description': response['choices'][0]['message']['content']
-                    })
-                except Exception as e:
-                    print(f"Error generating opportunity zone analysis: {e}")
-
-        if not any((l == -1 or (df[df['cluster'] == l].index.isin(noise_indices).any())) for l in unique_labels):
+        
+        # Handle scattered transitional points
+        scattered_mask = dense_labels == -1
+        scattered_indices = [dense_noise_indices[i] for i, is_member in enumerate(scattered_mask) if is_member]
+        if len(scattered_indices) > 0:
+            scattered_patents = df.iloc[scattered_indices]
+            description = analyze_patent_group(scattered_patents, 'transitional', -1)
             cluster_insights.append({
-                'type': 'opportunity_zone',
-                'size': 0,
-                'label': "No Sparse Regions",
-                'description': "No sparse regions (innovation gaps) were detected in this search."
+                'type': 'transitional',
+                'id': -1,
+                'size': len(scattered_indices),
+                'label': "Scattered Transitional Points",
+                'description': description
             })
-        return cluster_insights
+            print(f"Found {len(scattered_indices)} scattered transitional points")
 
-    # Use the limited cluster analysis
-    cluster_insights = analyze_clusters_limited(df, df['cluster'].values, embedding_3d)
+    # --- Analyze innovation gaps ---
+    if len(true_sparse_indices) > 0:
+        sparse_patents = df.iloc[true_sparse_indices]
+        sparse_points = scaled_embeddings[true_sparse_indices]
+        
+        # Subcluster the innovation gaps
+        min_subcluster_size = max(2, len(true_sparse_indices) // 10)
+        sparse_clusterer = hdbscan.HDBSCAN(
+            min_cluster_size=min_subcluster_size,
+            min_samples=1,
+            cluster_selection_epsilon=0.5,
+            metric='euclidean'
+        )
+        sparse_labels = sparse_clusterer.fit_predict(sparse_points)
+        
+        # Analyze each innovation subcluster
+        for label in set(sparse_labels):
+            subcluster_mask = sparse_labels == label
+            subcluster_patents = sparse_patents[subcluster_mask]
+            subcluster_size = len(subcluster_patents)
+            
+            if subcluster_size >= 2:
+                subcluster_label = "Scattered Innovation Points" if label == -1 else f"Innovation Subcluster {label + 1}"
+                description = analyze_patent_group(subcluster_patents, 'innovation_subcluster', label)
+                cluster_insights.append({
+                    'type': 'innovation_subcluster',
+                    'id': int(label),
+                    'size': subcluster_size,
+                    'label': subcluster_label,
+                    'description': description
+                })
+    else:
+        cluster_insights.append({
+            'type': 'innovation_subcluster',
+            'id': -1,
+            'size': 0,
+            'label': 'No Innovation Gaps',
+            'description': 'No significant innovation gaps were detected in this technology space.'
+        })
 
     update_progress('visualization', 'Creating interactive plot...')
+    
+    # Create Plotly figure with clusters
+    # Separate points into three categories: clusters, innovation gaps, and dense noise
+    cluster_mask = df['point_type'] == 'cluster'
+    innovation_gaps_mask = df['point_type'] == 'sparse'
+    dense_noise_mask = df['point_type'] == 'dense_noise'
     
     # Create hover text with cluster information
     hover_text = []
     for idx, row in df.iterrows():
         cluster_val = row['cluster']
-        if cluster_val == -1:
-            cluster_info = "<br><b>Region:</b> Sparse Region (Innovation Gap)"
-        elif cluster_val in promoted_cluster_labels:
-            cluster_info = f"<br><b>Cluster:</b> {promoted_cluster_labels[cluster_val]}"
+        if row['point_type'] == 'sparse':
+            point_info = "<br><b>Region:</b> Innovation Gap"
+        elif row['point_type'] == 'dense_noise':
+            point_info = "<br><b>Region:</b> Transitional Area"
         else:
-            cluster_info = f"<br><b>Cluster:</b> {cluster_val}"
+            point_info = f"<br><b>Cluster:</b> {cluster_val}"
         text = (
             f"<b>{row['title']}</b><br><br>"
             f"<b>By:</b> {row['assignee']} ({row['year']})<br>"
-            f"{cluster_info}<br><br>"
+            f"{point_info}<br><br>"
             f"<b>Abstract:</b><br>{row['abstract']}"
         )
         hover_text.append(text)
     
-    # Create Plotly figure with clusters
-    # Separate innovation gaps from clusters for different coloring
-    innovation_gaps_mask = clusters == -1
-    cluster_mask = ~innovation_gaps_mask
-
-    # Create two separate traces: one for clusters, one for innovation gaps
+    # Create three separate traces: clusters, innovation gaps, and dense noise points
     cluster_trace = go.Scatter3d(
         x=df[cluster_mask]['x'],
         y=df[cluster_mask]['y'],
@@ -682,9 +668,9 @@ Years: {years}
         z=df[innovation_gaps_mask]['z'],
         mode='markers',
         marker=dict(
-            size=12,  # Slightly larger to highlight gaps
-            color='red',  # Distinct color for innovation gaps
-            symbol='diamond',  # Different symbol for innovation gaps
+            size=12,
+            color='red',
+            symbol='diamond',
             opacity=0.9,
             line=dict(
                 color='white',
@@ -703,11 +689,38 @@ Years: {years}
         customdata=[df['link'].tolist()[i] for i in range(len(df)) if innovation_gaps_mask[i]]
     )
 
-    fig = go.Figure(data=[cluster_trace, innovation_gaps_trace])
+    dense_noise_trace = go.Scatter3d(
+        x=df[dense_noise_mask]['x'],
+        y=df[dense_noise_mask]['y'],
+        z=df[dense_noise_mask]['z'],
+        mode='markers',
+        marker=dict(
+            size=8,  # Slightly smaller than other points
+            color='orange',  # Distinct color for dense noise
+            symbol='circle',
+            opacity=0.6,  # More transparent
+            line=dict(
+                color='white',
+                width=1
+            )
+        ),
+        text=[hover_text[i] for i in range(len(hover_text)) if dense_noise_mask[i]],
+        hoverinfo='text',
+        name='Transitional Areas',
+        hoverlabel=dict(
+            bgcolor="white",
+            font_size=12,
+            font_family="Arial",
+            align="left"
+        ),
+        customdata=[df['link'].tolist()[i] for i in range(len(df)) if dense_noise_mask[i]]
+    )
+
+    fig = go.Figure(data=[cluster_trace, innovation_gaps_trace, dense_noise_trace])
     
     # Update layout
     fig.update_layout(
-        title="Patent Technology Landscape with Innovation Gaps",
+        title="Patent Technology Landscape",
         scene=dict(
             xaxis_title="UMAP 1",
             yaxis_title="UMAP 2",
@@ -719,7 +732,7 @@ Years: {years}
             )
         ),
         margin=dict(l=0, r=0, b=0, t=30),
-        showlegend=True,  # Show legend to distinguish clusters from innovation gaps
+        showlegend=True,
         template="plotly_dark",
         hoverlabel_align='left',
         hoverdistance=100,
