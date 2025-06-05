@@ -171,9 +171,7 @@
                     </button>
                 </div>
             </form>
-        </div>
-
-        <!-- Loading Status -->
+        </div>                <!-- Loading Status -->
         <div id="loading" class="loading-container hidden">
             <div class="mb-4">
                 <div class="flex justify-between items-center mb-2">
@@ -197,17 +195,12 @@
                 </div>
                 <div class="status-item" data-step="clustering">
                     <div class="status-icon status-pending">3</div>
-                    <div class="status-text">Identifying technology clusters</div>
-                    <div class="status-time"></div>
-                </div>
-                <div class="status-item" data-step="analysis">
-                    <div class="status-icon status-pending">4</div>
-                    <div class="status-text">Analyzing innovation opportunities</div>
+                    <div class="status-text">Analyzing & clustering patents</div>
                     <div class="status-time"></div>
                 </div>
                 <div class="status-item" data-step="visualization">
-                    <div class="status-icon status-pending">5</div>
-                    <div class="status-text">Creating interactive visualization</div>
+                    <div class="status-icon status-pending">4</div>
+                    <div class="status-text">Creating visualization</div>
                     <div class="status-time"></div>
                 </div>
             </div>
@@ -230,12 +223,22 @@
             
             progressEventSource = new EventSource('/progress');
             progressEventSource.onmessage = function(event) {
-                const data = JSON.parse(event.data);
-                updateProgress(data.step, data.status);
+                try {
+                    const data = JSON.parse(event.data);
+                    if (data.step === 'alive') {
+                        return; // Ignore keep-alive messages
+                    }
+                    updateProgress(data.step, data.status, event);
+                } catch (e) {
+                    console.error('Error processing progress update:', e);
+                }
             };
             
-            progressEventSource.onerror = function() {
-                progressEventSource.close();
+            progressEventSource.onerror = function(e) {
+                console.error('SSE Error:', e);
+                if (progressEventSource.readyState === EventSource.CLOSED) {
+                    progressEventSource.close();
+                }
             };
         }
 
@@ -247,32 +250,59 @@
         }
 
         function updateProgress(step, status) {
-            const steps = ['search', 'embedding', 'clustering', 'analysis', 'visualization'];
+            const steps = ['search', 'embedding', 'clustering', 'visualization'];
             const stepIndex = steps.indexOf(step);
-            const progress = ((stepIndex + 1) / steps.length) * 100;
+            let progress;
             
-            // Update progress bar
-            $('#progress-fill').css('width', `${progress}%`);
+            if (step === 'complete') {
+                progress = 100;
+            } else if (step === 'alive') {
+                // Don't update progress for keep-alive messages
+                return;
+            } else {
+                const stepsTotal = steps.length;
+                // Calculate base progress for completed steps
+                const baseProgress = (stepIndex / stepsTotal) * 100;
+                // Calculate progress within current step
+                const stepProgress = (1 / stepsTotal) * 100;
+                if (status === 'processing') {
+                    // Add partial progress within current step
+                    progress = Math.min(100, baseProgress + (stepProgress * 0.5));
+                } else {
+                    progress = baseProgress;
+                }
+            }
+            
+            // Update progress bar with smooth animation
+            $('#progress-fill').css({
+                'width': `${progress}%`,
+                'transition': 'width 0.3s ease-in-out'
+            });
             $('#progress-percentage').text(`${Math.round(progress)}%`);
             
-            // Update status text
+            // Update status text with more detailed messages
             const statusTexts = {
                 'search': 'Searching patent database...',
                 'embedding': 'Generating patent embeddings...',
-                'clustering': 'Identifying technology clusters...',
-                'analysis': 'Analyzing innovation opportunities...',
-                'visualization': 'Creating interactive visualization...'
+                'clustering': 'Analyzing patent relationships...',
+                'visualization': 'Creating visualization...',
+                'complete': 'Analysis complete!'
             };
-            $('#progress-text').text(statusTexts[step]);
+            
+            // Use message from backend if provided, otherwise use default text
+            const text = event && event.data ? 
+                JSON.parse(event.data).message || statusTexts[step] || 'Processing...' :
+                statusTexts[step] || 'Processing...';
+            $('#progress-text').text(text);
             
             // Update status items
             steps.forEach((s, i) => {
                 const item = $(`.status-item[data-step="${s}"]`);
                 const time = item.find('.status-time');
                 
-                if (i < stepIndex) {
+                if (step === 'complete' || i < stepIndex || (i === stepIndex && status === 'done')) {
                     item.removeClass('active').addClass('complete');
-                    if (!time.text()) {
+                    if (!time.text() || time.text() === 'In progress...') {
                         time.text(new Date().toLocaleTimeString());
                     }
                 } else if (i === stepIndex) {
@@ -344,38 +374,18 @@
                         // Display insights
                         if (response.insights) {
                             console.log('Displaying insights...');
-                            let insightsHtml = '<div class="grid grid-cols-1 lg:grid-cols-2 gap-6 p-6">';
+                            const clusters = response.insights.filter(i => i.type === 'cluster');
+                            const innovationSubclusters = response.insights.filter(i => i.type === 'innovation_subcluster');
+                            const transitionalAreas = response.insights.filter(i => i.type === 'transitional');
+                            console.log('Found clusters:', clusters.length);
+                            console.log('Found innovation subclusters:', innovationSubclusters.length);
+                            console.log('Found transitional areas:', transitionalAreas.length);
                             
-                            // Left column: Innovation Opportunities
-                            insightsHtml += '<div class="col-span-1">';
-                            insightsHtml += '<h3 class="text-2xl font-bold mb-4 text-green-400">Innovation Opportunities</h3>';
+                            let insightsHtml = '<div class="grid grid-cols-1 lg:grid-cols-3 gap-6 p-6">';
                             
-                            const opportunityZones = response.insights.filter(i => i.type === 'opportunity_zone');
-                            console.log('Found opportunity zones:', opportunityZones.length);
-                            
-                            if (opportunityZones.length > 0) {
-                                insightsHtml += '<div class="space-y-4">';
-                                opportunityZones.forEach(zone => {
-                                    // Use the label from backend, which matches the 3D plot (e.g. "Sparse Region 1 (Innovation Gap)")
-                                    insightsHtml += `
-                                        <div class="opportunity-card p-6 text-base">
-                                            <div class="text-green-300 text-lg font-bold mb-3">${zone.label} (${zone.size} patents)</div>
-                                            <div class="text-gray-300 whitespace-pre-line leading-relaxed">${zone.description}</div>
-                                        </div>
-                                    `;
-                                });
-                                insightsHtml += '</div>';
-                            } else {
-                                insightsHtml += '<p class="text-gray-400">No innovation opportunities identified.</p>';
-                            }
-                            insightsHtml += '</div>';
-
-                            // Right column: Technology Clusters
+                            // Left column: Technology Clusters
                             insightsHtml += '<div class="col-span-1">';
                             insightsHtml += '<h3 class="text-2xl font-bold mb-4 text-blue-400">Technology Clusters</h3>';
-                            
-                            const clusters = response.insights.filter(i => i.type === 'cluster');
-                            console.log('Found clusters:', clusters.length);
                             
                             if (clusters.length > 0) {
                                 insightsHtml += '<div class="space-y-4">';
@@ -390,6 +400,46 @@
                                 insightsHtml += '</div>';
                             } else {
                                 insightsHtml += '<p class="text-gray-400">No technology clusters identified.</p>';
+                            }
+                            insightsHtml += '</div>';
+
+                            // Middle column: Transitional Areas
+                            insightsHtml += '<div class="col-span-1">';
+                            insightsHtml += '<h3 class="text-2xl font-bold mb-4 text-orange-400">Transitional Areas</h3>';
+                            
+                            if (transitionalAreas.length > 0) {
+                                insightsHtml += '<div class="space-y-4">';
+                                transitionalAreas.forEach(area => {
+                                    insightsHtml += `
+                                        <div class="transitional-card p-6 text-base" style="background-color: #4d3d2d;">
+                                            <div class="text-orange-300 text-lg font-bold mb-3">${area.label}</div>
+                                            <div class="text-gray-300 whitespace-pre-line leading-relaxed">${area.description}</div>
+                                        </div>
+                                    `;
+                                });
+                                insightsHtml += '</div>';
+                            } else {
+                                insightsHtml += '<p class="text-gray-400">No transitional areas identified.</p>';
+                            }
+                            insightsHtml += '</div>';
+
+                            // Right column: Innovation Opportunities
+                            insightsHtml += '<div class="col-span-1">';
+                            insightsHtml += '<h3 class="text-2xl font-bold mb-4 text-green-400">Innovation Opportunities</h3>';
+                            
+                            if (innovationSubclusters.length > 0) {
+                                insightsHtml += '<div class="space-y-4">';
+                                innovationSubclusters.forEach(subcluster => {
+                                    insightsHtml += `
+                                        <div class="opportunity-card p-6 text-base">
+                                            <div class="text-green-300 text-lg font-bold mb-3">${subcluster.label} (${subcluster.size} patents)</div>
+                                            <div class="text-gray-300 whitespace-pre-line leading-relaxed">${subcluster.description}</div>
+                                        </div>
+                                    `;
+                                });
+                                insightsHtml += '</div>';
+                            } else {
+                                insightsHtml += '<p class="text-gray-400">No significant innovation opportunities identified in this technology space.</p>';
                             }
                             insightsHtml += '</div>';
 

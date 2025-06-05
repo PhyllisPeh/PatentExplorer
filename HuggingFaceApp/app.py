@@ -94,7 +94,7 @@ def search_patents(keywords, page_size=100):
     total_processed = 0
     
     while len(all_patents) < MAX_PATENTS:
-        update_progress('search', f'Fetching page {page} of patents...')
+        update_progress('search', 'processing', f'Fetching page {page} of patents...')
         
         # SerpApi Google Patents API endpoint
         api_url = "https://serpapi.com/search"
@@ -147,7 +147,7 @@ def search_patents(keywords, page_size=100):
                 # Get embedding for combined text
                 total_processed += 1
                 if total_processed % 10 == 0:  # Update progress every 10 patents
-                    update_progress('embedding', f'Processing patent {total_processed} of {MAX_PATENTS}...')
+                    update_progress('embedding', 'processing', f'Processing patent {total_processed} of {MAX_PATENTS}...')
                 
                 embedding = get_embedding(combined_text, embedding_cache)
 
@@ -247,10 +247,15 @@ def create_3d_visualization(patents):
     """
     Create a 3D visualization of patent embeddings using UMAP and Plotly
     """
+    # Initialize variables for tracking different point types
+    df = pd.DataFrame(patents)
+    df['point_type'] = 'cluster'  # Default type for all points
+    transitional_areas = []  # Initialize empty list for transitional areas
+    
     if not patents:
         return None
         
-    update_progress('clustering', 'Extracting embeddings...')
+    update_progress('clustering', 'processing', 'Extracting embeddings...')
     
     # Extract embeddings and metadata
     embeddings = []
@@ -286,13 +291,13 @@ def create_3d_visualization(patents):
     # Convert embeddings to numpy array
     embeddings_array = np.array(embeddings)
     
-    update_progress('clustering', 'Applying UMAP dimensionality reduction...')
+    update_progress('clustering', 'processing', 'Applying UMAP dimensionality reduction...')
     
     # Apply UMAP dimensionality reduction
     reducer = umap.UMAP(n_components=3, random_state=42)
     embedding_3d = reducer.fit_transform(embeddings_array)
     
-    update_progress('clustering', 'Performing DBSCAN clustering...')
+    update_progress('clustering', 'processing', 'Performing DBSCAN clustering...')
     
     # Create DataFrame for plotting
     df = pd.DataFrame(metadata)
@@ -305,9 +310,11 @@ def create_3d_visualization(patents):
     scaled_embeddings = scaler.fit_transform(embedding_3d)
 
     n_points = len(scaled_embeddings)
-    # Adjust min_cluster_size to be more conservative for smaller datasets
-    min_cluster_size = max(3, min(20, int(n_points * 0.015)))  # 1.5% of data, between 3 and 20
-    min_samples = max(2, min(10, int(n_points * 0.008)))      # 0.8% of data, between 2 and 10
+    update_progress('clustering', 'processing', f'Analyzing {n_points} patents for clustering...')
+    
+    # Adjust min_cluster_size to be more aggressive for better cluster separation
+    min_cluster_size = max(5, min(30, int(n_points * 0.02)))  # 2% of data, between 5 and 30
+    min_samples = max(3, min(15, int(n_points * 0.01)))      # 1% of data, between 3 and 15
 
     # Dynamically set max_clusters and target_noise based on number of patents
     if n_points < 100:
@@ -335,7 +342,13 @@ def create_3d_visualization(patents):
     n_noise = 0
 
     while retry < max_retries:
-        hdb = hdbscan.HDBSCAN(min_cluster_size=min_cluster_size, min_samples=min_samples)
+        hdb = hdbscan.HDBSCAN(
+            min_cluster_size=min_cluster_size,
+            min_samples=min_samples,
+            cluster_selection_epsilon=0.2,  # More aggressive cluster separation
+            cluster_selection_method='eom',  # Excess of Mass method for better cluster identification
+            metric='euclidean'
+        )
         clusters = hdb.fit_predict(scaled_embeddings)
         n_clusters = len(set(clusters)) - (1 if -1 in clusters else 0)
         n_noise = list(clusters).count(-1)
@@ -344,17 +357,37 @@ def create_3d_visualization(patents):
         print(f"Number of patents in sparse regions: {n_noise}")
         print(f"Total number of patents: {len(clusters)}")
         
-        # If too many clusters, merge by increasing min_cluster_size
+        # Check for problematic clustering outcomes
+        noise_ratio = n_noise / len(clusters)
+        avg_cluster_size = (len(clusters) - n_noise) / n_clusters if n_clusters > 0 else float('inf')
+        
+        print(f"Noise ratio: {noise_ratio:.2%}")
+        print(f"Average cluster size: {avg_cluster_size:.1f} patents")
+        
+        update_progress('clustering', 'processing', 
+            f'Optimizing clusters (attempt {retry + 1}/{max_retries}): ' +
+            f'Found {n_clusters} clusters with avg size {avg_cluster_size:.1f} patents')
+        
+        # If one giant cluster or too many tiny clusters
+        if n_clusters == 1 and avg_cluster_size > len(clusters) * 0.8:
+            print("Single dominant cluster detected, adjusting for better separation...")
+            min_cluster_size = max(5, int(min_cluster_size * 0.8))
+            min_samples = max(3, int(min_samples * 0.8))
+            retry += 1
+            continue
+            
+        # If too many clusters, merge by increasing parameters
         if n_clusters > max_clusters:
-            print("Too many clusters, increasing min_cluster_size...")
-            min_cluster_size = int(min_cluster_size * 1.5)
+            print("Too many clusters, increasing parameters for merging...")
+            min_cluster_size = int(min_cluster_size * 1.3)
             min_samples = int(min_samples * 1.2)
             retry += 1
             continue
-        # If no sparse regions, retry with smaller min_samples and min_cluster_size
-        if n_noise == 0:
-            print("No sparse regions detected, decreasing min_samples and min_cluster_size...")
-            min_cluster_size = max(2, int(min_cluster_size * 0.7))
+            
+        # If too few meaningful clusters or no sparse regions
+        if n_clusters < 2 or n_noise == 0 or noise_ratio < 0.05:
+            print("Insufficient cluster separation, adjusting parameters...")
+            min_cluster_size = max(3, int(min_cluster_size * 0.7))
             min_samples = max(2, int(min_samples * 0.7))
             retry += 1
             continue
@@ -390,12 +423,18 @@ def create_3d_visualization(patents):
         new_clusters[clusters == old_label] = new_label
     df['cluster'] = new_clusters
     
-    # --- Analyze clusters ---
+    update_progress('clustering', 'processing', 'Identifying technology clusters and innovation gaps...')
+    
+    # --- Initialize point types ---
+    df['point_type'] = 'unassigned'  # Start with all points unassigned
     cluster_insights = []  # Initialize insights list
     
-    # First analyze main clusters with new IDs
+    # First handle clustered points
+    total_clusters = len(cluster_info)
     for new_id, (_, size, cluster_patents) in enumerate(cluster_info):
+        update_progress('clustering', 'processing', f'Analyzing cluster {new_id + 1} of {total_clusters} ({size} patents)...')
         description = analyze_patent_group(cluster_patents, 'cluster', new_id)
+        df.loc[cluster_patents.index, 'point_type'] = 'cluster'  # Mark clustered points
         cluster_insights.append({
             'type': 'cluster',
             'id': int(new_id),
@@ -408,9 +447,14 @@ def create_3d_visualization(patents):
     noise_mask = df['cluster'] == -1
     noise_points = scaled_embeddings[noise_mask]
     noise_indices = df[noise_mask].index
+    dense_noise_indices = []  # Initialize empty list for dense noise points
     
     if len(noise_points) >= 3:
+        update_progress('clustering', 'processing', f'Analyzing {len(noise_points)} potential innovation gaps...')
         print(f"\nStructural Analysis for Innovation Gap Detection:")
+        
+        # Initialize sparse indices
+        true_sparse_indices = []
         
         # Stage 1: Calculate local and global density metrics
         n_neighbors = min(max(5, int(len(noise_points) * 0.05)), 15)
@@ -464,33 +508,45 @@ def create_3d_visualization(patents):
             # 2. Spatial Isolation: Points far from both clusters and other noise points
             # 3. Structural Stability: Points whose local neighborhood is also sparse
             
-            # Calculate isolation scores
-            density_isolation = density_ratios < 0.3  # Point density is less than 30% of nearest cluster
-            spatial_isolation = cluster_distances > np.percentile(cluster_distances, 75)
+            # Calculate isolation scores with adjusted thresholds
+            density_isolation = density_ratios < 0.4  # Much more lenient density threshold
+            spatial_isolation = cluster_distances > np.percentile(cluster_distances, 60)  # More lenient spatial threshold
             
-            # Calculate structural stability
-            # Check if neighboring points are also sparse
+            # Calculate structural stability with more lenient criteria
             structural_stability = np.zeros(len(noise_points), dtype=bool)
             for i, neighbors in enumerate(local_indices):
                 neighbor_densities = local_densities[neighbors]
-                # Point is stable if most neighbors are also sparse
-                structural_stability[i] = np.mean(neighbor_densities) < np.percentile(local_densities, 25)
+                # Point is stable if its neighborhood is relatively sparse
+                structural_stability[i] = np.mean(neighbor_densities) < np.mean(local_densities)
             
-            # Combine criteria with weights
-            true_sparse_indices = [
+            # First identify potential innovation gaps using basic criteria - need to meet 2 out of 3 criteria
+            candidate_sparse_indices = [
                 idx for i, idx in enumerate(noise_indices)
-                if (density_isolation[i] and spatial_isolation[i]) or  # Clear isolation
-                   (density_isolation[i] and structural_stability[i]) or  # Stable sparse region
-                   (spatial_isolation[i] and structural_stability[i])  # Stable distant region
+                if sum([density_isolation[i], spatial_isolation[i], structural_stability[i]]) >= 2  # Only need 2 out of 3 criteria
             ]
             
-            dense_noise_indices = [idx for idx in noise_indices if idx not in true_sparse_indices]
+            # Start by assuming all non-candidate points are dense noise
+            dense_noise_indices = [idx for idx in noise_indices if idx not in candidate_sparse_indices]
             
-            # Print detailed analysis
-            print("\nInnovation Gap Analysis:")
-            print(f"Points with density isolation: {np.sum(density_isolation)}")
-            print(f"Points with spatial isolation: {np.sum(spatial_isolation)}")
-            print(f"Points with structural stability: {np.sum(structural_stability)}")
+            # Now we can safely calculate distances between candidates and dense noise points
+            min_distance_threshold = np.percentile(cluster_distances, 60)  # 60th percentile of distances
+            
+            # Filter candidates based on distance from dense noise regions
+            if len(candidate_sparse_indices) > 0 and len(dense_noise_indices) > 0:
+                dense_noise_points = scaled_embeddings[dense_noise_indices]
+                true_sparse_indices = []
+                
+                for idx in candidate_sparse_indices:
+                    point = scaled_embeddings[idx].reshape(1, -1)
+                    distances_to_dense = NearestNeighbors(n_neighbors=1).fit(dense_noise_points).kneighbors(point)[0][0]
+                    if distances_to_dense > min_distance_threshold:
+                        true_sparse_indices.append(idx)
+                
+                # Update dense_noise_indices to include rejected candidates
+                rejected_indices = [idx for idx in candidate_sparse_indices if idx not in true_sparse_indices]
+                dense_noise_indices.extend(rejected_indices)
+            else:
+                true_sparse_indices = candidate_sparse_indices
         else:
             # Fallback using only local density analysis
             density_threshold = np.percentile(local_densities, 25)  # Bottom 25% sparsest points
@@ -508,13 +564,16 @@ def create_3d_visualization(patents):
             print("2. Spatial Isolation: Far from both clusters and other points")
             print("3. Structural Stability: Forms stable sparse regions with neighbors")
         
-        # Mark points in DataFrame
-        df['point_type'] = 'cluster'  # Default type
-        df.loc[true_sparse_indices, 'point_type'] = 'sparse'
-        df.loc[dense_noise_indices, 'point_type'] = 'dense_noise'
-    
+        # Update point types in DataFrame for sparse points and dense noise
+        for idx in true_sparse_indices:
+            df.at[idx, 'point_type'] = 'sparse'
+        for idx in dense_noise_indices:
+            df.at[idx, 'point_type'] = 'dense_noise'
+        
     # --- Handle dense noise points as transitional areas ---
+    transitional_areas = []  # Store transitional areas for sorting
     if len(dense_noise_indices) >= 3:
+        update_progress('clustering', 'processing', f'Analyzing {len(dense_noise_indices)} potential transitional areas...')
         print("\nAnalyzing dense noise points as transitional areas...")
         dense_noise_points = scaled_embeddings[dense_noise_indices]
         
@@ -535,68 +594,207 @@ def create_3d_visualization(patents):
         n_transitional = len(unique_dense_labels)
         print(f"Found {n_transitional} distinct transitional areas")
         
-        # Analyze each transitional area
-        for dense_label in unique_dense_labels:
-            dense_mask = dense_labels == dense_label
-            area_indices = [dense_noise_indices[i] for i, is_member in enumerate(dense_mask) if is_member]
-            
-            if len(area_indices) >= min_size:
-                area_patents = df.iloc[area_indices]
-                description = analyze_patent_group(area_patents, 'transitional', dense_label)
-                cluster_insights.append({
-                    'type': 'transitional',
-                    'id': int(dense_label),
-                    'size': len(area_indices),
-                    'label': f"Transitional Area {dense_label + 1}",
-                    'description': description
-                })
+        # First get all transitional points, including scattered ones
+        all_transitional_points = {}
+        # Count sizes first
+        label_sizes = {}
+        for label in dense_labels:
+            if label != -1:
+                label_sizes[label] = label_sizes.get(label, 0) + 1
+
+        # Then collect points with their pre-calculated sizes
+        for i, label in enumerate(dense_labels):
+            idx = dense_noise_indices[i]
+            if label != -1:  # Regular transitional area
+                if label not in all_transitional_points:
+                    all_transitional_points[label] = {'indices': [], 'size': label_sizes[label]}
+                all_transitional_points[label]['indices'].append(idx)
+            else:  # Scattered points
+                label_key = 'scattered'
+                if label_key not in all_transitional_points:
+                    all_transitional_points[label_key] = {'indices': [], 'size': 0}
+                all_transitional_points[label_key]['indices'].append(idx)
+                all_transitional_points[label_key]['size'] += 1
         
-        # Handle scattered transitional points
-        scattered_mask = dense_labels == -1
-        scattered_indices = [dense_noise_indices[i] for i, is_member in enumerate(scattered_mask) if is_member]
-        if len(scattered_indices) > 0:
-            scattered_patents = df.iloc[scattered_indices]
-            description = analyze_patent_group(scattered_patents, 'transitional', -1)
-            cluster_insights.append({
-                'type': 'transitional',
-                'id': -1,
-                'size': len(scattered_indices),
-                'label': "Scattered Transitional Points",
+        # Sort transitional areas by size and create insights
+        # Filter out areas that are too small and sort by size
+        min_area_size = 3  # Minimum size for a valid transitional area
+        valid_areas = [(k, v) for k, v in all_transitional_points.items() 
+                     if k != 'scattered' and v['size'] >= min_area_size]
+        sorted_areas = sorted(valid_areas, key=lambda x: x[1]['size'], reverse=True)
+        
+        # Add regular transitional areas to insights
+        total_areas = len(sorted_areas)
+        for area_idx, (label, area_info) in enumerate(sorted_areas):
+            update_progress('clustering', 'processing', f'Analyzing transitional area {area_idx + 1} of {total_areas} ({area_info["size"]} patents)...')
+            area_patents = df.iloc[area_info['indices']]
+            description = analyze_patent_group(area_patents, 'transitional', label)
+            area_number = area_idx + 1  # 1-based numbering for display
+            
+            # Create label without duplicate size info
+            area_label = f"Transitional Area {area_number}"
+            transitional_areas.append({
+                'label': area_label,
+                'indices': area_info['indices'],
+                'size': area_info['size'],
+                'patents': area_patents,
                 'description': description
             })
-            print(f"Found {len(scattered_indices)} scattered transitional points")
+            area_insight = {
+                'type': 'transitional',
+                'id': int(label),
+                'size': area_info['size'],
+                'label': f"{area_label} ({area_info['size']} patents)",
+                'description': description
+            }
+            cluster_insights.append(area_insight)
+        
+        # Handle scattered points by analyzing them individually
+        if 'scattered' in all_transitional_points:
+            scattered_indices = all_transitional_points['scattered']['indices']
+            if len(scattered_indices) > 0:
+                print(f"\nAnalyzing {len(scattered_indices)} scattered points...")
+                scattered_points = scaled_embeddings[scattered_indices]
+                
+                # Calculate distances to nearest cluster and transitional area
+                distances_to_clusters = []
+                distances_to_transitional = []
+                
+                print("\nDistance analysis for each scattered point:")
+                point_counter = 0
+                
+                # First calculate all distances
+                for point in scattered_points:
+                    point = point.reshape(1, -1)
+                    # Distance to nearest cluster
+                    if len(cluster_centers) > 0:
+                        dist_cluster = NearestNeighbors(n_neighbors=1).fit(cluster_centers).kneighbors(point)[0][0][0]
+                    else:
+                        dist_cluster = float('inf')
+                        
+                    # Distance to nearest transitional area (excluding scattered points)
+                    if len(dense_noise_points) > 0:
+                        # Get only the transitional area points (excluding scattered points)
+                        transitional_points = []
+                        for i, point_idx in enumerate(dense_noise_indices):
+                            if point_idx not in scattered_indices:
+                                transitional_points.append(dense_noise_points[i])
+                        
+                        if transitional_points:
+                            transitional_points = np.array(transitional_points)
+                            nbrs_trans = NearestNeighbors(n_neighbors=1).fit(transitional_points)
+                            dist_trans = nbrs_trans.kneighbors(point.reshape(1, -1))[0][0][0]
+                        else:
+                            dist_trans = float('inf')
+                    else:
+                        dist_trans = float('inf')
+                    
+                        # Store distances for ratio calculation
+                    distances_to_clusters.append(dist_cluster)
+                    distances_to_transitional.append(dist_trans)
 
+                total_classified_as_gaps = 0
+                total_classified_as_transitional = 0
+                
+                # Use more aggressive thresholds for scattered points
+                cluster_distance_threshold = np.percentile(distances_to_clusters, 35)  # Even more lenient
+                transitional_distance_threshold = np.percentile(distances_to_transitional, 35)  # Even more lenient
+                
+                print(f"\nClassification thresholds:")
+                print(f"- Cluster distance threshold: {cluster_distance_threshold:.3f}")
+                print(f"- Transitional distance threshold: {transitional_distance_threshold:.3f}")
+                
+                # Classify scattered points
+                for idx, (dist_c, dist_t) in zip(scattered_indices, zip(distances_to_clusters, distances_to_transitional)):
+                    # 1. Check absolute distances with more lenient thresholds
+                    cluster_dist_threshold = np.percentile(distances_to_clusters, 60)  # Use 60th percentile
+                    trans_dist_threshold = np.percentile(distances_to_transitional, 60)  # Use 60th percentile
+                    
+                    # Point is isolated if it's farther than median distance from both clusters and transitional areas
+                    is_isolated = (dist_c > cluster_dist_threshold or dist_t > trans_dist_threshold)
+                    
+                    # 2. Calculate isolation based on absolute difference rather than ratio
+                    isolation_diff = dist_t - dist_c  # Positive means farther from transitional areas
+                    is_relatively_isolated = isolation_diff > 0  # Any positive difference counts
+                    
+                    # 3. Simplified region formation check
+                    nearby_transitional = sum(1 for d in distances_to_transitional if d < trans_dist_threshold)
+                    nearby_clusters = sum(1 for d in distances_to_clusters if d < cluster_dist_threshold)
+                    
+                    # Point forms new region if it has any cluster neighbors
+                    forms_new_region = nearby_clusters > 0
+                    
+                    # Classification decision and immediate DataFrame update
+                    if (is_isolated or is_relatively_isolated) and forms_new_region:
+                        true_sparse_indices.append(idx)
+                        df.at[idx, 'point_type'] = 'sparse'  # Immediately update DataFrame
+                        total_classified_as_gaps += 1
+                    else:
+                        dense_noise_indices.append(idx)
+                        df.at[idx, 'point_type'] = 'dense_noise'  # Immediately update DataFrame
+                        total_classified_as_transitional += 1
+                        
+                print(f"\nFinal classification summary for scattered points:")
+                print(f"- Total scattered points: {len(scattered_indices)}")
+                print(f"- Classified as innovation gaps: {total_classified_as_gaps}")
+                print(f"- Classified as transitional: {total_classified_as_transitional}")
+                if total_classified_as_gaps == 0:
+                    print("\nWarning: No scattered points were classified as innovation gaps!")
+                    print("Possible reasons:")
+                    print("1. Distance thresholds may be too high")
+                    print("2. Relative distance ratio may be too strict")
+                    print("3. Nearby points criterion may be too restrictive")
+    
     # --- Analyze innovation gaps ---
     if len(true_sparse_indices) > 0:
+        update_progress('clustering', 'processing', f'Analyzing {len(true_sparse_indices)} potential innovation opportunities...')
+        print(f"\nProcessing {len(true_sparse_indices)} innovation gaps...")
         sparse_patents = df.iloc[true_sparse_indices]
         sparse_points = scaled_embeddings[true_sparse_indices]
         
-        # Subcluster the innovation gaps
+        # Ensure points are marked as sparse in the DataFrame
+        df.loc[true_sparse_indices, 'point_type'] = 'sparse'
+        
+        # Subcluster the innovation gaps with more lenient parameters
         min_subcluster_size = max(2, len(true_sparse_indices) // 10)
         sparse_clusterer = hdbscan.HDBSCAN(
             min_cluster_size=min_subcluster_size,
             min_samples=1,
-            cluster_selection_epsilon=0.5,
+            cluster_selection_epsilon=0.7,  # Increased epsilon for better gap detection
             metric='euclidean'
         )
         sparse_labels = sparse_clusterer.fit_predict(sparse_points)
         
-        # Analyze each innovation subcluster
+        # Collect innovation subclusters for sorting
+        innovation_subclusters = []
         for label in set(sparse_labels):
             subcluster_mask = sparse_labels == label
             subcluster_patents = sparse_patents[subcluster_mask]
             subcluster_size = len(subcluster_patents)
             
             if subcluster_size >= 2:
-                subcluster_label = "Scattered Innovation Points" if label == -1 else f"Innovation Subcluster {label + 1}"
                 description = analyze_patent_group(subcluster_patents, 'innovation_subcluster', label)
-                cluster_insights.append({
-                    'type': 'innovation_subcluster',
-                    'id': int(label),
+                innovation_subclusters.append({
+                    'label': label,
                     'size': subcluster_size,
-                    'label': subcluster_label,
+                    'patents': subcluster_patents,
                     'description': description
                 })
+        
+        # Sort innovation subclusters by size in descending order
+        innovation_subclusters.sort(key=lambda x: x['size'], reverse=True)
+        
+        # Add sorted innovation subclusters to insights
+        total_subclusters = len(innovation_subclusters)
+        for idx, subcluster in enumerate(innovation_subclusters):
+            update_progress('clustering', 'processing', f'Analyzing innovation opportunity {idx + 1} of {total_subclusters} ({subcluster["size"]} patents)...')
+            cluster_insights.append({
+                'type': 'innovation_subcluster',
+                'id': int(subcluster['label']),
+                'size': subcluster['size'],
+                'label': f"Innovation Gap {idx + 1}",
+                'description': subcluster['description']
+            })
     else:
         cluster_insights.append({
             'type': 'innovation_subcluster',
@@ -606,22 +804,75 @@ def create_3d_visualization(patents):
             'description': 'No significant innovation gaps were detected in this technology space.'
         })
 
-    update_progress('visualization', 'Creating interactive plot...')
+    update_progress('visualization', 'processing', 'Creating interactive plot...')
     
     # Create Plotly figure with clusters
+    # Ensure all points are properly categorized
+    unassigned_mask = df['point_type'] == 'unassigned'
+    if any(unassigned_mask):
+        print(f"Warning: {sum(unassigned_mask)} points remain unassigned")
+        df.loc[unassigned_mask, 'point_type'] = 'cluster'  # Default unassigned to clusters
+    
     # Separate points into three categories: clusters, innovation gaps, and dense noise
     cluster_mask = df['point_type'] == 'cluster'
     innovation_gaps_mask = df['point_type'] == 'sparse'
     dense_noise_mask = df['point_type'] == 'dense_noise'
     
-    # Create hover text with cluster information
+    # Validate and debug point type assignments before visualization
+    total_points = len(df)
+    cluster_count = sum(cluster_mask)
+    gaps_count = sum(innovation_gaps_mask)
+    transitional_count = sum(dense_noise_mask)
+    
+    print("\nFinal Point Distribution:")
+    print(f"Total points: {total_points}")
+    print(f"Cluster points: {cluster_count} ({cluster_count/total_points:.1%})")
+    print(f"Innovation gaps: {gaps_count} ({gaps_count/total_points:.1%})")
+    print(f"Transitional areas: {transitional_count} ({transitional_count/total_points:.1%})")
+    
+    # Detailed debug information
+    print("\nDetailed Point Type Analysis:")
+    print("Point type counts from DataFrame:")
+    print(df['point_type'].value_counts())
+    
+    print("\nInnovation Gap Details:")
+    if gaps_count > 0:
+        gap_points = df[innovation_gaps_mask]
+        print(f"Sample of innovation gap points:")
+        print(gap_points[['title', 'point_type']].head())
+        print("\nCoordinates of innovation gaps:")
+        print(gap_points[['x', 'y', 'z']].head())
+    else:
+        print("No innovation gaps detected!")
+    
+    # Initialize transitional area map
+    transitional_area_map = {}
+    for area_idx, area in enumerate(transitional_areas):
+        for idx in area['indices']:
+            transitional_area_map[idx] = {'number': area_idx + 1, 'size': area['size']}
+    
+    # Create hover text for all points
     hover_text = []
+    # Create mapping for innovation gap points to their numbers
+    innovation_gap_map = {}
+    innovation_gap_counter = 1
+    for mask, patents in df[df['point_type'] == 'sparse'].groupby(sparse_labels):
+        for idx in patents.index:
+            innovation_gap_map[idx] = innovation_gap_counter
+        innovation_gap_counter += 1
+
+    # Generate hover text for each point
     for idx, row in df.iterrows():
         cluster_val = row['cluster']
         if row['point_type'] == 'sparse':
-            point_info = "<br><b>Region:</b> Innovation Gap"
+            gap_number = innovation_gap_map.get(idx, 1)  # Default to 1 if not found
+            point_info = f"<br><b>Region:</b> Innovation Gap {gap_number}"
         elif row['point_type'] == 'dense_noise':
-            point_info = "<br><b>Region:</b> Transitional Area"
+            area_info = transitional_area_map.get(idx)
+            if area_info:
+                point_info = f"<br><b>Region:</b> Transitional Area {area_info['number']} ({area_info['size']} patents)"
+            else:
+                point_info = "<br><b>Region:</b> Transitional Area"
         else:
             point_info = f"<br><b>Cluster:</b> {cluster_val}"
         text = (
@@ -631,7 +882,7 @@ def create_3d_visualization(patents):
             f"<b>Abstract:</b><br>{row['abstract']}"
         )
         hover_text.append(text)
-    
+
     # Create three separate traces: clusters, innovation gaps, and dense noise points
     cluster_trace = go.Scatter3d(
         x=df[cluster_mask]['x'],
@@ -639,10 +890,10 @@ def create_3d_visualization(patents):
         z=df[cluster_mask]['z'],
         mode='markers',
         marker=dict(
-            size=10,
+            size=6,  # Made even smaller for better contrast with gaps
             color=clusters[cluster_mask],
             colorscale='Viridis',
-            opacity=0.8,
+            opacity=0.5,  # More transparent to make gaps more visible
             showscale=True,
             colorbar=dict(
                 title="Clusters",
@@ -668,13 +919,13 @@ def create_3d_visualization(patents):
         z=df[innovation_gaps_mask]['z'],
         mode='markers',
         marker=dict(
-            size=12,
-            color='red',
+            size=6,  # Same size as other points
+            color='rgb(255, 0, 0)',  # Pure bright red
             symbol='diamond',
-            opacity=0.9,
+            opacity=1.0,  # Full opacity for visibility
             line=dict(
                 color='white',
-                width=1
+                width=1  # Thinner border to match other points
             )
         ),
         text=[hover_text[i] for i in range(len(hover_text)) if innovation_gaps_mask[i]],
@@ -695,13 +946,13 @@ def create_3d_visualization(patents):
         z=df[dense_noise_mask]['z'],
         mode='markers',
         marker=dict(
-            size=8,  # Slightly smaller than other points
-            color='orange',  # Distinct color for dense noise
+            size=6,  # Same size as other points
+            color='rgb(255, 165, 0)',  # Orange for transitional areas
             symbol='circle',
-            opacity=0.6,  # More transparent
+            opacity=0.7,  # Less opacity to make gaps more visible
             line=dict(
                 color='white',
-                width=1
+                width=1  # Thin border
             )
         ),
         text=[hover_text[i] for i in range(len(hover_text)) if dense_noise_mask[i]],
@@ -728,8 +979,9 @@ def create_3d_visualization(patents):
             camera=dict(
                 up=dict(x=0, y=0, z=1),
                 center=dict(x=0, y=0, z=0),
-                eye=dict(x=1.5, y=1.5, z=1.5)
-            )
+                eye=dict(x=1.8, y=1.8, z=1.8)  # Slightly further out for better overview
+            ),
+            aspectmode='cube'  # Force equal scaling
         ),
         margin=dict(l=0, r=0, b=0, t=30),
         showlegend=True,
@@ -742,17 +994,26 @@ def create_3d_visualization(patents):
             y=0.99,
             xanchor="left",
             x=0.01,
-            bgcolor="rgba(0,0,0,0.5)",
-            font=dict(color="white")
+            bgcolor="rgba(0,0,0,0.7)",  # Darker background for better contrast
+            font=dict(
+                color="white",
+                size=12
+            ),
+            itemsizing='constant'  # Keep legend marker sizes consistent
         )
     )
     
-    # Add hover template configuration
+    # Configure hover behavior
     fig.update_traces(
-        hovertemplate='%{text}<extra></extra>'
+        hovertemplate='%{text}<extra></extra>',
+        hoverlabel=dict(
+            bgcolor="rgba(0,0,0,0.8)",
+            font_size=12,
+            font_family="Arial"
+        )
     )
     
-    update_progress('visualization', 'Finalizing visualization...')
+    update_progress('visualization', 'processing', 'Finalizing visualization...')
     
     return {
         'plot': fig.to_json(),
@@ -767,23 +1028,50 @@ def home():
 def get_progress():
     """Server-sent events endpoint for progress updates"""
     def generate():
-        while True:
+        connection_active = True
+        while connection_active:
             try:
-                data = progress_queue.get(timeout=30)  # 30 second timeout
+                data = progress_queue.get(timeout=10)  # Reduced timeout for more responsive updates
                 if data == 'DONE':
-                    break
-                yield f"data: {json.dumps(data)}\n\n"
+                    yield f"data: {json.dumps({'step': 'complete', 'status': 'done'})}\n\n"
+                    connection_active = False
+                else:
+                    yield f"data: {json.dumps(data)}\n\n"
             except queue.Empty:
-                break
-    return Response(generate(), mimetype='text/event-stream')
-
-def update_progress(step, status='processing'):
-    """Update progress through the progress queue"""
-    progress_queue.put({
-        'step': step,
-        'status': status,
-        'timestamp': datetime.now().strftime('%H:%M:%S')
+                # Send a keep-alive message
+                yield f"data: {json.dumps({'step': 'alive', 'status': 'processing'})}\n\n"
+                continue
+            
+            # Ensure the data is sent immediately
+            if hasattr(generate, 'flush'):
+                generate.flush()
+                
+    return Response(generate(), mimetype='text/event-stream', headers={
+        'Cache-Control': 'no-cache, no-transform',
+        'Connection': 'keep-alive',
+        'Content-Type': 'text/event-stream',
+        'X-Accel-Buffering': 'no'  # Disable buffering for nginx
     })
+
+def update_progress(step, status='processing', message=None):
+    """Update progress through the progress queue"""
+    try:
+        # Clear any old messages to prevent queue buildup while preserving the order
+        with threading.Lock():
+            while not progress_queue.empty():
+                progress_queue.get_nowait()
+            
+            # Send the new progress update
+            data = {
+                'step': step,
+                'status': status,
+                'message': message or '',
+                'timestamp': datetime.now().strftime('%H:%M:%S'),
+                'id': str(time.time())  # Add unique ID for each update
+            }
+            progress_queue.put(data)
+    except Exception as e:
+        print(f"Error updating progress: {e}")
 
 @app.route('/search', methods=['POST'])
 def search():
@@ -798,28 +1086,25 @@ def search():
         while not progress_queue.empty():
             progress_queue.get_nowait()
             
-        # Search for patents
-        update_progress('search')
+        # Initial progress update
+        update_progress('search', 'processing', 'Starting patent search...')
         patents = search_patents(keywords)
         if not patents:
+            update_progress('search', 'error', 'No patents found')
+            progress_queue.put('DONE')
             return jsonify({'error': 'No patents found or an error occurred'})
         
-        # Generate embeddings
-        update_progress('embedding')
+        # Generate embeddings progress is handled in search_patents function
         
-        # Cluster analysis
-        update_progress('clustering')
-        
-        # Innovation analysis
-        update_progress('analysis')
-        
-        # Create visualization
-        update_progress('visualization')
+        # Start visualization processing
+        update_progress('visualization', 'Creating visualization...')
         viz_data = create_3d_visualization(patents)
         if not viz_data:
+            progress_queue.put('DONE')
             return jsonify({'error': 'Error creating visualization'})
         
-        # Signal completion
+        # Final progress update
+        update_progress('complete', 'Analysis complete!')
         progress_queue.put('DONE')
         
         return jsonify({
