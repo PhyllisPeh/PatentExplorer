@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify, Response, send_file
+from flask import Flask, render_template, request, jsonify, Response
 from dotenv import load_dotenv
 import requests
 from datetime import datetime
@@ -20,39 +20,25 @@ import threading
 import hdbscan
 from sklearn.neighbors import NearestNeighbors
 import traceback
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
-# Load environment variables
 load_dotenv()
 
-# Initialize Flask application with proper template folder
-template_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), 'templates'))
-static_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), 'static'))
+app = Flask(__name__)
 
-# Ensure the template and static directories exist
-os.makedirs(template_dir, exist_ok=True)
-os.makedirs(static_dir, exist_ok=True)
-
-app = Flask(__name__,
-           template_folder=template_dir,
-           static_folder=static_dir)
-
-# Configure for production
-app.config['ENV'] = 'production'
-app.config['DEBUG'] = False
+# Get API keys from environment variables
+SERPAPI_API_KEY = os.getenv('SERPAPI_API_KEY')
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+MAX_PATENTS = 3000  # Increased from 2000 to 5000 for better coverage
+MIN_PATENTS_FOR_GAPS = 3000  # Minimum patents needed for reliable gap detection
+CACHE_FILE = 'patent_embeddings_cache.pkl'
 
 # Global progress queue for SSE updates
 progress_queue = queue.Queue()
 
-# Get API keys from environment variables
-SERPAPI_API_KEY = os.getenv('SERPAPI_API_KEY', 'default')  # Use default for HuggingFace demo
-OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', 'default')    # Use default for HuggingFace demo
-MAX_PATENTS = 3000  # Increased from 2000 to 5000 for better coverage
-MIN_PATENTS_FOR_GAPS = 3000  # Minimum patents needed for reliable gap detection
-CACHE_FILE = os.path.join(os.path.dirname(__file__), 'patent_embeddings_cache.pkl')
+if not SERPAPI_API_KEY:
+    raise ValueError("SERPAPI_API_KEY environment variable is not set")
+if not OPENAI_API_KEY:
+    raise ValueError("OPENAI_API_KEY environment variable is not set")
 
 # Initialize OpenAI API key
 openai.api_key = OPENAI_API_KEY
@@ -195,72 +181,47 @@ def search_patents(keywords, page_size=100):
     return all_patents
 
 def analyze_patent_group(patents, group_type, label, max_retries=3):
-    """
-    Analyze a group of patents using ChatGPT with retry logic.
-    group_type: 'cluster', 'innovation_subcluster', 'transitional'
-    """
-    titles = "; ".join(patents['title'].tolist()[:3])  # Show top 3 titles
-    assignees = ", ".join(patents['assignee'].unique())
-    years = f"{patents['year'].min()} - {patents['year'].max()}"
+    """Analyze patent groups using ChatGPT"""
+    # Get titles and date range
+    titles = "; ".join(patents['title'].tolist()[:3])
+    years = f"{patents['year'].min()}-{patents['year'].max()}"
+    
+    prompts = {
+        'cluster': (
+            f"Patents: {titles}. Years: {years}\nSummarize in 2-3 sentences.",
+            "Describe the key aspects."
+        ),
+        'transitional': (
+            f"Patents: {titles}. Years: {years}\nSummarize in 2-3 sentences.",
+            "Describe the key aspects."
+        ),
+        'innovation_subcluster': (
+            f"Patents: {titles}. Years: {years}\nSummarize in 2-3 sentences.",
+            "Describe the key aspects."
+        )
+    }
+    
+    base_prompt = prompts[group_type][0]
     
     retry_count = 0
-    base_delay = 1  # Base delay in seconds
-    
-    if group_type == 'cluster':
-        prompt = f"""Cluster Analysis:
-Patents: {titles}
-Assignees: {assignees}
-Timeline: {years}
-
-Provide a concise analysis:
-1. Technology Focus: Core capabilities and unique aspects
-2. Development Trend: Key innovation patterns and direction"""
-        
-        system_prompt = "Patent expert. Focus on unique aspects and trends. Be concise."
-    elif group_type == 'transitional':
-        prompt = f"""Transitional Area Analysis:
-Patents: {titles}
-Assignees: {assignees}
-Timeline: {years}
-
-Provide a concise analysis:
-1. Technology Focus: Emerging technology capabilities
-2. Convergence Potential: Key cross-domain opportunities"""
-        
-        system_prompt = "Patent expert. Focus on emerging trends and convergence. Be concise."
-    else:  # innovation_subcluster
-        prompt = f"""Underexplored Area Analysis:
-Patents: {titles}
-Assignees: {assignees}
-Timeline: {years}
-
-Provide a concise analysis:
-1. Technology Focus: Unique technical characteristics
-2. Innovation Potential: Key opportunities and gaps"""
-        
-        system_prompt = "Patent expert. Focus on unique aspects and innovation potential. Be concise."
-    
     while retry_count < max_retries:
         try:
             response = openai.ChatCompletion.create(
                 model="gpt-3.5-turbo",
                 messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt}
+                    {"role": "system", "content": prompts[group_type][1]},
+                    {"role": "user", "content": base_prompt}
                 ],
-                max_tokens=150,  # Reduced from 200 to enforce brevity
+                max_tokens=150,
                 temperature=0.7
             )
             return response.choices[0]['message']['content']
         except Exception as e:
             retry_count += 1
             if retry_count < max_retries:
-                delay = base_delay * (2 ** (retry_count - 1))  # Exponential backoff
-                print(f"Attempt {retry_count} failed. Retrying in {delay} seconds...")
-                time.sleep(delay)
+                time.sleep(2 ** (retry_count - 1))
             else:
-                print(f"Final error generating analysis after {max_retries} attempts: {e}")
-                return f"Analysis generation failed after {max_retries} attempts."
+                return "Analysis failed."
 
 def create_3d_visualization(patents):
     """
@@ -1134,28 +1095,27 @@ def analyze_innovation_opportunities(cluster_insights):
 
     prompt = f"""Available Areas:
 Clusters: {format_area_list(cluster_nums)}
-Transitional: {format_area_list(transitional_nums)}
-Underexplored: {format_area_list(underexplored_nums)}
-
+Transitional Areas: {format_area_list(transitional_nums)} 
+Underexplored Areas: {format_area_list(underexplored_nums)}
 Area Descriptions:
 {descriptions_text}
-
-Identify 3 key innovation gaps. For each:
-Innovation Gap [1-3]:
-- Between: [Area Type] #X and [Area Type] #Y 
-- Gap: What specific technological capability is missing?
-- Needs: What core technologies and capabilities are needed?
-- Path: What technical approach could bridge this gap?
-- Impact: What specific benefits would bridging this gap provide?
-
-Rules: 
-- Only reference existing area numbers
-- Focus on gaps between technologically related areas
-- Consider both direct and cross-domain applications"""
+Analyze the most promising innovation opportunities. For each opportunity:
+1. Identify two technologically complementary areas (e.g. "Cluster 1 + Transitional Area 2")
+2. Focus on specific technical capabilities that could be combined
+3. Aim for practical, near-term innovations
+Provide 3 opportunities, formatted as:
+Opportunity N:
+[Area 1] + [Area 2]
+- Gap: Specific technical capability missing between these areas
+- Solution: Concrete technical approach using existing methods
+- Impact: Clear technical or market advantage gained
+Prioritize:
+- Technical feasibility over speculative concepts
+- Cross-domain applications with clear synergies
+- Opportunities that build on existing technology strengths"""
 
     # Get analysis from LLM
     response = generate_analysis(prompt, cluster_insights)
-    
     return response
 
 def update_progress(step, status='processing', message=None):
@@ -1275,28 +1235,9 @@ def generate_analysis(prompt, cluster_insights):
         print(f"Error generating analysis: {e}")
         return "Unable to generate innovation analysis at this time."
 
-@app.route('/health')
-def health_check():
-    """Health check endpoint for HuggingFace"""
-    return jsonify({"status": "healthy"}), 200
-
-@app.errorhandler(404)
-def not_found_error(error):
-    return jsonify({"error": "Not found"}), 404
-
-@app.errorhandler(500)
-def internal_error(error):
-    return jsonify({"error": "Internal server error"}), 500
-
-# Make sure templates directory exists and has index.html
 @app.route('/')
-def index():
-    """Main page route"""
-    try:
-        return render_template('index.html')
-    except Exception as e:
-        app.logger.error(f"Error rendering template: {str(e)}")
-        return jsonify({"error": "Template error", "details": str(e)}), 500
+def home():
+    return render_template('index.html')
 
 @app.route('/progress')
 def get_progress():
@@ -1376,12 +1317,5 @@ def search():
         progress_queue.put('DONE')
         return jsonify({'error': str(e)})
 
-def main():
-    # Get port from environment variable or use default
-    port = int(os.environ.get('PORT', 7860))
-    
-    # Run the app
-    app.run(host='0.0.0.0', port=port)
-
 if __name__ == '__main__':
-    main()
+    app.run(host='0.0.0.0', port=7860)
