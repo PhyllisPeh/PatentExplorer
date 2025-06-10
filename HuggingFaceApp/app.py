@@ -1,39 +1,245 @@
-from flask import Flask, render_template, request, jsonify, Response
-from dotenv import load_dotenv
-import requests
-from datetime import datetime
-import os
+from flask import Flask, render_template, request, jsonify, Response, session, send_file
+from flask_session import Session
+from queue import Queue, Empty
 import json
-import openai
-import numpy as np
-import pickle
-from pathlib import Path
-import umap
-import plotly.express as px
-import plotly.graph_objects as go
-import pandas as pd
-from sklearn.cluster import DBSCAN
-from sklearn.preprocessing import StandardScaler
-import time
-import queue
-import threading
-import hdbscan
-from sklearn.neighbors import NearestNeighbors
 import traceback
+import tempfile
+import time
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+import io
+import os
+import sys
+import numpy as np
+import pandas as pd
+import umap
+import openai
+from sklearn.neighbors import NearestNeighbors
+from sklearn.preprocessing import StandardScaler
+import hdbscan
+import plotly.graph_objects as go
+import pickle
+import requests
+from datetime import datetime, timedelta
+import re
 
-load_dotenv()
+# Determine if running in Docker or local environment
+IS_DOCKER = os.path.exists('/.dockerenv') or os.environ.get('DOCKER_CONTAINER') == 'true' or '/' in os.getcwd()
+print(f"Running in {'Docker container' if IS_DOCKER else 'local environment'}")
+print(f"Current working directory: {os.getcwd()}")
 
 app = Flask(__name__)
+
+# Create and configure progress queue as part of app config
+app.config['PROGRESS_QUEUE'] = Queue()
+
+# Set base directories based on environment
+if IS_DOCKER:
+    base_dir = "/home/user/app"
+    session_dir = os.path.join(base_dir, 'flask_session')
+    data_dir = os.path.join(base_dir, 'data', 'visualizations')
+else:
+    base_dir = os.getcwd()
+    session_dir = os.path.normpath(os.path.join(base_dir, 'flask_session'))
+    data_dir = os.path.normpath(os.path.join(base_dir, 'data', 'visualizations'))
+
+# Create required directories
+os.makedirs(session_dir, exist_ok=True)
+os.makedirs(data_dir, exist_ok=True)
+
+# Set stricter session configuration 
+app.config.update(
+    SESSION_TYPE='filesystem',
+    SESSION_FILE_DIR=session_dir,
+    SESSION_PERMANENT=True,
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Lax',
+    SESSION_USE_SIGNER=True,
+    SECRET_KEY=os.getenv('FLASK_SECRET_KEY', os.urandom(24)),
+    SESSION_REFRESH_EACH_REQUEST=True,
+    PERMANENT_SESSION_LIFETIME=timedelta(minutes=30)
+)
+session_dir = os.path.normpath(os.path.join(base_dir, 'flask_session'))
+data_dir = os.path.normpath(os.path.join(base_dir, 'data', 'visualizations'))
+
+# Ensure directories exist with proper permissions
+for directory in [session_dir, data_dir]:
+    directory = os.path.normpath(directory)
+    if not os.path.exists(directory):
+        os.makedirs(directory, exist_ok=True)
+
+# Initialize session extension before any route handlers
+Session(app)
+
+@app.before_request 
+def before_request():
+    """Ensure session and viz_file path are properly initialized"""
+    # Initialize permanent session
+    session.permanent = True
+    
+    # Create new session ID if needed
+    if not session.get('id'):
+        session['id'] = os.urandom(16).hex()
+        print(f"Created new session ID: {session['id']}")
+        
+        # Check for existing visualizations that can be used for this new session
+        if IS_DOCKER:
+            # Use Linux-style paths for Docker
+            base_dir = "/home/user/app"
+            data_dir = os.path.join(base_dir, 'data', 'visualizations')
+            temp_dir = '/tmp'
+        else:
+            # Use platform-independent paths for local development
+            base_dir = os.getcwd()
+            data_dir = os.path.normpath(os.path.join(base_dir, 'data', 'visualizations'))
+            temp_dir = tempfile.gettempdir()
+        
+        # Find the most recent visualization file
+        most_recent_file = None
+        most_recent_time = 0
+        
+        if os.path.exists(data_dir):
+            for filename in os.listdir(data_dir):
+                if filename.startswith("patent_viz_") and filename.endswith(".json"):
+                    file_path = os.path.join(data_dir, filename)
+                    file_time = os.path.getmtime(file_path)
+                    if file_time > most_recent_time:
+                        most_recent_time = file_time
+                        most_recent_file = file_path
+        
+        # Also check temp directory
+        if os.path.exists(temp_dir):
+            for filename in os.listdir(temp_dir):
+                if filename.startswith("patent_viz_") and filename.endswith(".json"):
+                    file_path = os.path.join(temp_dir, filename)
+                    file_time = os.path.getmtime(file_path)
+                    if file_time > most_recent_time:
+                        most_recent_time = file_time
+                        most_recent_file = file_path
+        
+        if most_recent_file:
+            print(f"Found existing visualization for new session: {most_recent_file}")
+            # Copy this visualization for the new session
+            try:
+                # Create paths for the new session
+                new_data_path = os.path.join(data_dir, f'patent_viz_{session["id"]}.json')
+                new_temp_path = os.path.join(temp_dir, f'patent_viz_{session["id"]}.json')
+                
+                # Ensure directories exist
+                os.makedirs(os.path.dirname(new_data_path), exist_ok=True)
+                os.makedirs(os.path.dirname(new_temp_path), exist_ok=True)
+                
+                # Read existing visualization
+                with open(most_recent_file, 'r') as src:
+                    viz_data = json.load(src)
+                
+                # Write to both locations for the new session
+                with open(new_data_path, 'w') as f:
+                    json.dump(viz_data, f)
+                with open(new_temp_path, 'w') as f:
+                    json.dump(viz_data, f)
+                
+                print(f"Copied existing visualization to new session files: {new_data_path} and {new_temp_path}")
+            except Exception as e:
+                print(f"Error copying existing visualization for new session: {e}")
+    
+    session_id = session['id']
+    
+    # Use the global IS_DOCKER variable that includes the '/' in os.getcwd() check
+    print(f"Running in Docker environment: {IS_DOCKER}")
+    
+    # Set data directory paths based on environment
+    if IS_DOCKER:
+        # Use Linux-style paths for Docker
+        base_dir = "/home/user/app"
+        data_dir = os.path.join(base_dir, 'data', 'visualizations')
+        temp_dir = '/tmp'
+    else:
+        # Use platform-independent paths for local development
+        base_dir = os.getcwd()
+        data_dir = os.path.normpath(os.path.join(base_dir, 'data', 'visualizations'))
+        temp_dir = tempfile.gettempdir()
+    
+    # Create data directory if it doesn't exist
+    try:
+        os.makedirs(data_dir, exist_ok=True)
+        print(f"Created/verified data directory: {data_dir}")
+        # Debug directory contents
+        print(f"Contents of data directory: {os.listdir(data_dir)}")
+    except Exception as e:
+        print(f"Error creating data directory: {e}")
+    
+    # Create file paths based on environment
+    data_path = os.path.join(data_dir, f'patent_viz_{session_id}.json')
+    temp_path = os.path.join(temp_dir, f'patent_viz_{session_id}.json')
+    
+    # Use normpath for Windows but not for Docker
+    if not IS_DOCKER:
+        data_path = os.path.normpath(data_path)
+        temp_path = os.path.normpath(temp_path)
+    
+    print(f"Data path set to: {data_path}")
+    print(f"Temp path set to: {temp_path}")
+    
+    # Check if visualization exists before updating paths
+    data_exists = os.path.exists(data_path)
+    temp_exists = os.path.exists(temp_path)
+    print(f"Data file exists: {data_exists}")
+    print(f"Temp file exists: {temp_exists}")
+    
+    if data_exists:
+        print(f"Found visualization in data dir: {data_path}")
+        # Ensure temp copy exists
+        try:
+            if not temp_exists:
+                # Ensure temp directory exists
+                temp_parent = os.path.dirname(temp_path)
+                if not os.path.exists(temp_parent):
+                    os.makedirs(temp_parent, exist_ok=True)
+                    
+                with open(data_path, 'r') as src:
+                    with open(temp_path, 'w') as dst:
+                        dst.write(src.read())
+                print(f"Created temp backup: {temp_path}")
+        except Exception as e:
+            print(f"Warning: Failed to create temp backup: {e}")
+    elif temp_exists:
+        print(f"Found visualization in temp dir: {temp_path}")
+        # Restore from temp
+        try:
+            with open(temp_path, 'r') as src:
+                with open(data_path, 'w') as dst:
+                    dst.write(src.read())
+            print(f"Restored from temp to: {data_path}")
+        except Exception as e:
+            print(f"Warning: Failed to restore from temp: {e}")
+    
+    # Update session paths
+    session['viz_file'] = data_path
+    session['temp_viz_file'] = temp_path
+    session.modified = True
+    
+    print(f"Session paths - Data: {data_path} (exists={os.path.exists(data_path)})")
+    print(f"Session paths - Temp: {temp_path} (exists={os.path.exists(temp_path)})")
+
+@app.after_request
+def after_request(response):
+    """Ensure session is saved after each request"""
+    try:
+        session.modified = True
+        print(f"Session after request: {dict(session)}")
+    except Exception as e:
+        print(f"Error saving session: {e}")
+    return response
 
 # Get API keys from environment variables
 SERPAPI_API_KEY = os.getenv('SERPAPI_API_KEY')
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
-MAX_PATENTS = 3000  # Increased from 2000 to 5000 for better coverage
+MAX_PATENTS = 3000  # Maximum patents to process
 MIN_PATENTS_FOR_GAPS = 3000  # Minimum patents needed for reliable gap detection
 CACHE_FILE = 'patent_embeddings_cache.pkl'
-
-# Global progress queue for SSE updates
-progress_queue = queue.Queue()
 
 if not SERPAPI_API_KEY:
     raise ValueError("SERPAPI_API_KEY environment variable is not set")
@@ -85,7 +291,7 @@ def get_embedding(text, cache):
 
 def search_patents(keywords, page_size=100):
     """
-    Search patents using SerpApi's Google Patents API with pagination and generate embeddings
+    Search patents using Google Patents and generate embeddings
     """
     # Load existing cache
     embedding_cache = load_cache()
@@ -136,13 +342,11 @@ def search_patents(keywords, page_size=100):
                         pass
 
                 # Get assignee
-                assignee = patent.get('assignee', 'N/A')
-                if isinstance(assignee, list) and assignee:
-                    assignee = assignee[0]
+                assignee = patent.get('assignee', ['N/A'])[0] if isinstance(patent.get('assignee'), list) else patent.get('assignee', 'N/A')
 
                 # Format title and abstract for embedding
                 title = patent.get('title', '').strip()
-                abstract = patent.get('snippet', '').strip()
+                abstract = patent.get('snippet', '').strip()  # SerpAPI uses 'snippet' for abstract
                 combined_text = f"{title}\n{abstract}".strip()
 
                 # Get embedding for combined text
@@ -157,7 +361,7 @@ def search_patents(keywords, page_size=100):
                     'assignee': assignee,
                     'filing_year': filing_year,
                     'abstract': abstract,
-                    'link': patent.get('patent_link', '') or patent.get('link', ''),
+                    'link': patent.get('patent_link', '') or patent.get('link', ''),  # SerpAPI provides patent_link or link
                     'embedding': embedding
                 }
                 all_patents.append(formatted_patent)
@@ -165,7 +369,8 @@ def search_patents(keywords, page_size=100):
             print(f"Retrieved {len(patents_data)} patents from page {page}")
             
             # Check if there are more pages
-            if not response_data.get('serpapi_pagination', {}).get('next'):
+            has_more = len(patents_data) >= page_size
+            if not has_more:
                 break
                 
             page += 1
@@ -1040,6 +1245,52 @@ def create_3d_visualization(patents):
         'insights': cluster_insights
     }
 
+def generate_analysis(prompt, cluster_insights):
+    """Generate analysis using OpenAI's GPT API with retries and validation"""
+    try:
+        # Add system context
+        messages = [
+            {
+                "role": "system",
+                "content": "You are an expert patent analyst specializing in technology landscapes and innovation opportunities."
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ]
+        
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=messages,
+            temperature=0.7,
+            max_tokens=1000
+        )
+        
+        analysis = response.choices[0].message['content']
+        
+        # Validate that analysis references valid areas
+        area_pattern = r'(?:Cluster|Transitional Area|Underexplored Area)\s+(\d+)'
+        referenced_areas = set(int(num) for num in re.findall(area_pattern, analysis))
+        
+        # Extract valid area numbers from insights
+        valid_areas = set()
+        for insight in cluster_insights:
+            if insight['id'] > 0:  # Skip special IDs like -1
+                valid_areas.add(insight['id'])
+        
+        # Check if all referenced areas are valid
+        invalid_areas = referenced_areas - valid_areas
+        if invalid_areas:
+            print(f"Warning: Analysis references invalid areas: {invalid_areas}")
+            return "Error: Unable to generate valid analysis. Please try again."
+            
+        return analysis
+        
+    except Exception as e:
+        print(f"Error generating analysis: {e}")
+        return "Error generating innovation analysis. Please try again."
+
 def analyze_innovation_opportunities(cluster_insights):
     """
     Analyze relationships between different areas to identify potential innovation opportunities.
@@ -1120,6 +1371,7 @@ Prioritize:
 
 def update_progress(step, status='processing', message=None):
     """Update progress through the progress queue"""
+    progress_queue = app.config['PROGRESS_QUEUE']
     data = {
         'step': step,
         'status': status
@@ -1128,131 +1380,77 @@ def update_progress(step, status='processing', message=None):
         data['message'] = message
     progress_queue.put(data)
 
-def validate_area_references(analysis_text, cluster_insights):
-    """Validate that all area references in the analysis are valid and match their descriptions."""
-    import re
-    from difflib import SequenceMatcher
+# Add error handlers right before the routes
+@app.errorhandler(404)
+def page_not_found(e):
+    """Handle 404 errors"""
+    return jsonify({'error': 'Not found - please check the URL and try again'}), 404
 
-    # Create maps of area descriptions
-    area_descriptions = {}
-    for insight in cluster_insights:
-        if insight.get('description'):
-            area_type = insight.get('type', '')
-            area_id = int(insight.get('id', -1))  # IDs are already 1-based
-            area_descriptions[f"{area_type}_{area_id}"] = insight['description'].lower()
+@app.errorhandler(500)
+def internal_server_error(e):
+    """Handle 500 errors"""
+    return jsonify({'error': 'Internal server error occurred'}), 500
 
-    def check_context_similarity(area_ref, context, area_type):
-        # Get the referenced area's description
-        key = f"{area_type}_{area_ref}"
-        if key not in area_descriptions:
-            return False, f"Area {area_ref} does not exist"
-        return True, None
-
-        return True, None
-
-    def find_references_with_context(text, pattern, label):
-        matches = []
-        for match in re.finditer(pattern, text):
-            start = max(0, match.start() - 200)
-            end = min(len(text), match.end() + 200)
-            context = text[start:end]
-            matches.append((match.group(1), context))
-        return matches
-
-    patterns = [
-        (r'(?:Cluster|cluster) (\d+)(?!\d)', 'cluster'),
-        (r'(?:Transitional|transitional) [Aa]rea (\d+)(?!\d)', 'transitional'),
-        (r'(?:Underexplored|underexplored) [Aa]rea (\d+)(?!\d)', 'innovation_subcluster')
-    ]
-
-    # Check each type of reference
-    for pattern, area_type in patterns:
-        refs = find_references_with_context(analysis_text, pattern, area_type)
-        for ref, context in refs:
-            ref_num = int(ref)
-            valid, message = check_context_similarity(ref_num, context, area_type)
-            if not valid:
-                return False, message
-
-    return True, "All area references are valid and match their descriptions"
-
-def generate_analysis(prompt, cluster_insights):
-    """Generate an analysis of innovation opportunities using OpenAI's API"""
-    try:
-        # Count the number of each type of area from cluster_insights
-        cluster_count = sum(1 for x in cluster_insights if x['type'] == 'cluster')
-        transitional_count = sum(1 for x in cluster_insights if x['type'] == 'transitional')
-        underexplored_count = sum(1 for x in cluster_insights if x['type'] == 'innovation_subcluster' and x['id'] >= 0)
-        
-        # Minimal system message
-        system_message = """Expert patent analyst specializing in technology landscapes and innovation opportunities. Guidelines:
-1. Reference only valid areas with correct type and number
-2. Focus on specific technical aspects and capabilities
-3. Consider both direct applications and cross-domain potential
-4. Identify concrete opportunities and practical approaches
-5. Ground analysis in technical feasibility"""
-        
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": system_message},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.7,
-            max_tokens=1000
-        )
-        
-        analysis = response.choices[0].message.content
-        
-        # Validate the generated analysis
-        is_valid, message = validate_area_references(analysis, cluster_insights)
-        
-        if not is_valid:
-            # Retry with minimal error context
-            messages = [
-                {"role": "system", "content": system_message},
-                {"role": "user", "content": prompt},
-                {"role": "system", "content": "Fix invalid areas."},
-                {"role": "assistant", "content": analysis}
-            ]
-            
-            chat_completion = openai.ChatCompletion.create(
-                model="gpt-3.5-turbo",
-                messages=messages,
-                temperature=0.7,
-                max_tokens=1000
-            )
-            analysis = chat_completion.choices[0].message.content
-            
-            # Final validation
-            is_valid, _ = validate_area_references(analysis, cluster_insights)
-            
-            if not is_valid:
-                analysis = "Error: Invalid analysis. Try again."
-        
-        return analysis
-    except Exception as e:
-        print(f"Error generating analysis: {e}")
-        return "Unable to generate innovation analysis at this time."
-
+# Add index route before other routes
 @app.route('/')
 def home():
-    return render_template('index.html')
+    """Home page route - check for existing visualizations"""
+    # Check if we have any visualization data
+    has_visualization = False
+    
+    # If this is a new session, check for existing visualizations
+    if not session.get('viz_file') or not os.path.exists(session.get('viz_file')):
+        # Define directories based on environment
+        if IS_DOCKER:
+            # Use Linux-style paths for Docker
+            base_dir = "/home/user/app"
+            data_dir = os.path.join(base_dir, 'data', 'visualizations')
+            temp_dir = '/tmp'
+        else:
+            # Use platform-independent paths for local development
+            base_dir = os.getcwd()
+            data_dir = os.path.normpath(os.path.join(base_dir, 'data', 'visualizations'))
+            temp_dir = tempfile.gettempdir()
+        
+        # Look for any visualization files in both directories
+        print(f"Checking for existing visualizations in data dir: {data_dir}")
+        if os.path.exists(data_dir):
+            for filename in os.listdir(data_dir):
+                if filename.startswith("patent_viz_") and filename.endswith(".json"):
+                    print(f"Found visualization in data dir: {filename}")
+                    has_visualization = True
+                    break
+        
+        # Also check temp directory
+        if not has_visualization and os.path.exists(temp_dir):
+            print(f"Checking for existing visualizations in temp dir: {temp_dir}")
+            for filename in os.listdir(temp_dir):
+                if filename.startswith("patent_viz_") and filename.endswith(".json"):
+                    print(f"Found visualization in temp dir: {filename}")
+                    has_visualization = True
+                    break
+    else:
+        print(f"Session already has visualization file: {session.get('viz_file')}")
+        has_visualization = True
+    
+    print(f"Has existing visualization: {has_visualization}")
+    return render_template('index.html', has_existing_visualization=has_visualization)
 
 @app.route('/progress')
 def get_progress():
     """Server-sent events endpoint for progress updates"""
+    progress_queue = app.config['PROGRESS_QUEUE']
     def generate():
         connection_active = True
         while connection_active:
             try:
-                data = progress_queue.get(timeout=10)  # Reduced timeout for more responsive updates
+                data = progress_queue.get(timeout=10) # Reduced timeout for more responsive updates
                 if data == 'DONE':
                     yield f"data: {json.dumps({'step': 'complete', 'status': 'done'})}\n\n"
                     connection_active = False
                 else:
                     yield f"data: {json.dumps(data)}\n\n"
-            except queue.Empty:
+            except Empty:
                 # Send a keep-alive message
                 yield f"data: {json.dumps({'step': 'alive', 'status': 'processing'})}\n\n"
                 continue
@@ -1268,8 +1466,11 @@ def get_progress():
         'X-Accel-Buffering': 'no'  # Disable buffering for nginx
     })
 
-@app.route('/search', methods=['POST'])
+@app.route('/search', methods=['POST']) 
 def search():
+    progress_queue = app.config['PROGRESS_QUEUE']
+    while not progress_queue.empty():
+        progress_queue.get_nowait()
     keywords = request.form.get('keywords', '')
     if not keywords:
         return jsonify({'error': 'Please enter search keywords'})
@@ -1277,6 +1478,16 @@ def search():
     print(f"\nProcessing search request for keywords: {keywords}")
     
     try:
+        # Use existing session ID, never create new one here
+        session_id = session.get('id')
+        if not session_id:
+            return jsonify({'error': 'Invalid session'})
+            
+        data_path = session.get('viz_file')
+        temp_path = session.get('temp_viz_file')
+        if not data_path or not temp_path:
+            return jsonify({'error': 'Invalid session paths'})
+        
         # Clear any existing progress updates
         while not progress_queue.empty():
             progress_queue.get_nowait()
@@ -1289,21 +1500,56 @@ def search():
             progress_queue.put('DONE')
             return jsonify({'error': 'No patents found or an error occurred'})
         
-        # Generate embeddings progress is handled in search_patents function
-        
-        # Start visualization processing
+        # Generate visualization and insights
         update_progress('visualization', 'Creating visualization...')
         viz_data = create_3d_visualization(patents)
-        if not viz_data:
+        if not viz_data or not viz_data.get('plot'):
             progress_queue.put('DONE')
             return jsonify({'error': 'Error creating visualization'})
             
+        # Generate innovation analysis from insights
+        innovation_analysis = analyze_innovation_opportunities(viz_data['insights'])
+        
+        # Save visualization data to persistent storage
+        data_path = session['viz_file']
+        temp_path = session['temp_viz_file']
+        
+        # Save to persistent storage
+        print(f"Saving visualization to: {data_path}")
+        try:
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(data_path), exist_ok=True)
+            
+            with open(data_path, 'w') as f:
+                json.dump(viz_data, f)
+                f.flush()
+                os.fsync(f.fileno())
+            print(f"Successfully saved visualization to {data_path}")
+        except Exception as e:
+            print(f"Error saving visualization to {data_path}: {e}")
+            
+        # Save to temp storage
+        print(f"Saving temp copy to: {temp_path}")
+        try:
+            # Ensure temp directory exists
+            temp_dir = os.path.dirname(temp_path)
+            if not os.path.exists(temp_dir):
+                os.makedirs(temp_dir, exist_ok=True)
+                
+            with open(temp_path, 'w') as f:
+                json.dump(viz_data, f)
+            print(f"Successfully saved temp copy to {temp_path}")
+        except Exception as e:
+            print(f"Error saving temp copy to {temp_path}: {e}")
+            
+        session.modified = True
+        
+        # Only store analysis in session since it's smaller
+        session['last_analysis'] = innovation_analysis
+        
         # Final progress update
         update_progress('complete', 'Analysis complete!')
         progress_queue.put('DONE')
-        
-        # Generate innovation analysis from insights
-        innovation_analysis = analyze_innovation_opportunities(viz_data['insights'])
         
         return jsonify({
             'visualization': viz_data['plot'],
@@ -1316,6 +1562,362 @@ def search():
         traceback.print_exc()
         progress_queue.put('DONE')
         return jsonify({'error': str(e)})
+
+@app.route('/download_plot')
+def download_plot():
+    try:
+        # Add debug logging
+        print("\nDownload Plot Debug Info:")
+        print(f"Session ID: {session.get('id')}")
+        print(f"Session data: {dict(session)}")
+        
+        # Use the global Docker environment variable
+        print(f"Running in Docker: {IS_DOCKER}")
+        
+        # Get paths from session
+        data_path = session.get('viz_file')
+        temp_path = session.get('temp_viz_file')
+        
+        # Log paths and check if they exist
+        print(f"Data path: {data_path}")
+        if data_path:
+            data_exists = os.path.exists(data_path)
+            print(f"Data path exists: {data_exists}")
+            if not data_exists:
+                # Debug directory contents
+                parent_dir = os.path.dirname(data_path)
+                print(f"Parent directory ({parent_dir}) exists: {os.path.exists(parent_dir)}")
+                if os.path.exists(parent_dir):
+                    print(f"Contents of {parent_dir}: {os.listdir(parent_dir)}")
+        
+        print(f"Temp path: {temp_path}")
+        if temp_path:
+            temp_exists = os.path.exists(temp_path)
+            print(f"Temp path exists: {temp_exists}")
+            if not temp_exists:
+                # Debug temp directory
+                temp_dir = os.path.dirname(temp_path)
+                print(f"Temp directory ({temp_dir}) exists: {os.path.exists(temp_dir)}")
+                if os.path.exists(temp_dir):
+                    print(f"Contents of {temp_dir}: {os.listdir(temp_dir)}")
+        
+        # Try both locations
+        viz_file = None
+        if data_path and os.path.exists(data_path):
+            viz_file = data_path
+            print(f"Using primary data path: {viz_file}")
+        elif temp_path and os.path.exists(temp_path):
+            viz_file = temp_path
+            print(f"Using temp path: {viz_file}")
+            # Copy to persistent storage if only in temp
+            try:
+                with open(temp_path, 'r') as f:
+                    viz_data = json.load(f)
+                # Ensure parent directory exists
+                os.makedirs(os.path.dirname(data_path), exist_ok=True)
+                with open(data_path, 'w') as f:
+                    json.dump(viz_data, f)
+                    f.flush()
+                    os.fsync(f.fileno())
+                print(f"Copied temp file to persistent storage: {data_path}")
+            except Exception as e:
+                print(f"Error copying from temp to persistent storage: {e}")
+        else:
+            # If no visualization file for current session, try to find the most recent one
+            print("No visualization file found for current session. Searching for most recent visualization...")
+            
+            # Determine directory paths based on environment
+            if IS_DOCKER:
+                # Use Linux-style paths for Docker
+                base_dir = "/home/user/app"
+                data_parent_dir = os.path.join(base_dir, 'data', 'visualizations')
+                temp_parent_dir = '/tmp'
+            else:
+                # Use platform-independent paths for local development
+                base_dir = os.getcwd()
+                data_parent_dir = os.path.normpath(os.path.join(base_dir, 'data', 'visualizations'))
+                temp_parent_dir = tempfile.gettempdir()
+            
+            most_recent_file = None
+            most_recent_time = 0
+            
+            # Check data directory first
+            if os.path.exists(data_parent_dir):
+                print(f"Checking data directory: {data_parent_dir}")
+                for filename in os.listdir(data_parent_dir):
+                    if filename.startswith("patent_viz_") and filename.endswith(".json"):
+                        file_path = os.path.join(data_parent_dir, filename)
+                        file_time = os.path.getmtime(file_path)
+                        print(f"Found file: {file_path}, modified: {datetime.fromtimestamp(file_time)}")
+                        if file_time > most_recent_time:
+                            most_recent_time = file_time
+                            most_recent_file = file_path
+            
+            # Then check temp directory
+            if os.path.exists(temp_parent_dir):
+                print(f"Checking temp directory: {temp_parent_dir}")
+                for filename in os.listdir(temp_parent_dir):
+                    if filename.startswith("patent_viz_") and filename.endswith(".json"):
+                        file_path = os.path.join(temp_parent_dir, filename)
+                        file_time = os.path.getmtime(file_path)
+                        print(f"Found file: {file_path}, modified: {datetime.fromtimestamp(file_time)}")
+                        if file_time > most_recent_time:
+                            most_recent_time = file_time
+                            most_recent_file = file_path
+            
+            if most_recent_file:
+                print(f"Found most recent visualization file: {most_recent_file}")
+                viz_file = most_recent_file
+                
+                # Update the session with this file
+                try:
+                    # Copy to this session's files
+                    with open(most_recent_file, 'r') as f:
+                        viz_data = json.load(f)
+                    
+                    # Save to the current session's data path
+                    os.makedirs(os.path.dirname(data_path), exist_ok=True)
+                    with open(data_path, 'w') as f:
+                        json.dump(viz_data, f)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    
+                    # Also save to temp path
+                    os.makedirs(os.path.dirname(temp_path), exist_ok=True)
+                    with open(temp_path, 'w') as f:
+                        json.dump(viz_data, f)
+                    
+                    print(f"Copied most recent visualization to current session's files")
+                    viz_file = data_path  # Use the new file for this session
+                    
+                    # Update session paths
+                    session['viz_file'] = data_path
+                    session['temp_viz_file'] = temp_path
+                    session.modified = True
+                except Exception as e:
+                    print(f"Error copying most recent visualization to current session: {e}")
+            else:
+                print("No visualization files found in either location")
+                return jsonify({'error': 'No visualizations found. Please run a new search.'}), 404  # Return 404 status code
+            
+        # Continue with existing download code...
+        try:
+            print(f"Reading visualization file: {viz_file}")
+            with open(viz_file, 'r') as f:
+                viz_data = json.load(f)
+                print(f"Visualization data keys: {viz_data.keys()}")
+                plot_data = viz_data.get('plot')
+                if not plot_data:
+                    print("No plot data found in visualization file")
+                    # Check what's actually in the file
+                    print(f"Visualization data contains: {viz_data.keys()}")
+                    return jsonify({'error': 'Invalid plot data - missing plot field'}), 404
+                print("Successfully loaded plot data")
+        except json.JSONDecodeError as je:
+            print(f"JSON decode error when reading visualization file: {je}")
+            # Try to read raw file
+            try:
+                with open(viz_file, 'r') as f:
+                    raw_content = f.read()
+                print(f"Raw file content (first 200 chars): {raw_content[:200]}")
+            except Exception as e2:
+                print(f"Error reading raw file: {e2}")
+            return jsonify({'error': f'Corrupt visualization data: {str(je)}'}), 500
+        except Exception as e:
+            print(f"Error reading visualization file: {e}")
+            return jsonify({'error': f'Failed to read visualization data: {str(e)}'}), 500
+        
+        # Create a temporary file for the HTML
+        try:
+            print("Creating temporary HTML file...")
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False) as f:
+                # Write the HTML content
+                html_content = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Patent Technology Landscape</title>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+</head>
+<body>
+    <div id="plot"></div>
+    <script>
+        var plotData = %s;
+        Plotly.newPlot('plot', plotData.data, plotData.layout);
+    </script>
+</body>
+</html>
+                """ % plot_data
+                
+                f.write(html_content)
+                temp_html_path = f.name
+                print(f"Created temporary HTML file at: {temp_html_path}")
+            
+            print("Sending file to user...")
+            return send_file(
+                temp_html_path,
+                as_attachment=True,
+                download_name='patent_landscape.html',
+                mimetype='text/html'
+            )
+        except Exception as e:
+            print(f"Error creating or sending HTML file: {e}")
+            return jsonify({'error': f'Failed to generate plot file: {str(e)}'}), 500
+            
+    except Exception as e:
+        print(f"Error in download_plot: {e}")
+        return jsonify({'error': f'Failed to process download request: {str(e)}'}), 500
+
+@app.route('/download_insights')
+def download_insights():
+    """Download the latest insights as a PDF file"""
+    try:
+        # Check if session exists
+        if not session.get('id'):
+            return jsonify({'error': 'No active session found. Please run a new search.'})
+
+        viz_file = session.get('viz_file')
+        analysis = session.get('last_analysis')
+        print(f"Visualization file path from session: {viz_file}")
+        print(f"Analysis data available: {bool(analysis)}")
+        
+        if not viz_file:
+            print("No visualization file path found in session")
+            return jsonify({'error': 'No insights available - missing file path'})
+            
+        if not os.path.exists(viz_file):
+            print(f"Visualization file does not exist at path: {viz_file}")
+            return jsonify({'error': 'No insights available - file not found'})
+        
+        try:
+            print(f"Reading visualization file: {viz_file}")
+            with open(viz_file, 'r') as f:
+                viz_data = json.load(f)
+                insights = viz_data.get('insights')
+                if not insights:
+                    print("No insights found in visualization file")
+                    return jsonify({'error': 'Invalid insights data - missing insights field'})
+                print(f"Successfully loaded insights data with {len(insights)} insights")
+        except Exception as e:
+            print(f"Error reading visualization file: {e}")
+            return jsonify({'error': f'Failed to load insights: {str(e)}'})
+        
+        # Create a PDF in memory
+        print("Creating PDF in memory...")
+        buffer = io.BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=letter)
+        
+        styles = getSampleStyleSheet()
+        
+        # Create custom styles
+        title_style = ParagraphStyle(
+            'CustomTitle',
+            parent=styles['Title'],
+            fontSize=24,
+            spaceAfter=30
+        )
+        heading_style = ParagraphStyle(
+            'CustomHeading',
+            parent=styles['Heading1'],
+            fontSize=16,
+            spaceAfter=20
+        )
+        normal_style = ParagraphStyle(
+            'CustomNormal',
+            parent=styles['Normal'],
+            fontSize=12,
+            spaceAfter=12
+        )
+        
+        # Build the document
+        try:
+            print("Building PDF document structure...")
+            story = []
+            story.append(Paragraph("Patent Technology Landscape Analysis", title_style))
+            
+            # Add clusters
+            print("Adding technology clusters section...")
+            story.append(Paragraph("Technology Clusters", heading_style))
+            cluster_count = 0
+            for insight in insights:
+                if insight['type'] == 'cluster':
+                    text = f"<b>Cluster {insight['id']}:</b> {insight['description']}"
+                    story.append(Paragraph(text, normal_style))
+                    story.append(Spacer(1, 12))
+                    cluster_count += 1
+            print(f"Added {cluster_count} clusters")
+            
+            # Add transitional areas
+            print("Adding transitional areas section...")
+            story.append(Paragraph("Transitional Areas", heading_style))
+            trans_count = 0
+            for insight in insights:
+                if insight['type'] == 'transitional':
+                    text = f"<b>Transitional Area {insight['id']}:</b> {insight['description']}"
+                    story.append(Paragraph(text, normal_style))
+                    story.append(Spacer(1, 12))
+                    trans_count += 1
+            print(f"Added {trans_count} transitional areas")
+            
+            # Add underexplored areas
+            print("Adding underexplored areas section...")
+            story.append(Paragraph("Underexplored Areas", heading_style))
+            underexplored_count = 0
+            for insight in insights:
+                if insight['type'] == 'innovation_subcluster':
+                    text = f"<b>Underexplored Area {insight['id']}:</b> {insight['description']}"
+                    story.append(Paragraph(text, normal_style))
+                    story.append(Spacer(1, 12))
+                    underexplored_count += 1
+            print(f"Added {underexplored_count} underexplored areas")
+            
+            # Add innovation analysis if available
+            if analysis:
+                print("Adding innovation opportunities analysis...")
+                story.append(Paragraph("Innovation Opportunities Analysis", heading_style))
+                story.append(Paragraph(analysis, normal_style))
+            
+            # Build PDF
+            print("Building final PDF document...")
+            doc.build(story)
+            buffer.seek(0)
+            
+            print("Sending PDF file to user...")
+            return send_file(
+                buffer,
+                as_attachment=True,
+                download_name='patent_insights.pdf',
+                mimetype='application/pdf'
+            )
+        except Exception as e:
+            print(f"Error generating PDF: {e}")
+            return jsonify({'error': f'Failed to generate PDF file: {str(e)}'})
+            
+    except Exception as e:
+        print(f"Error in download_insights: {e}")
+        return jsonify({'error': f'Failed to process download request: {str(e)}'})
+
+@app.teardown_request
+def cleanup_temp_files(exception=None):
+    """Clean up temporary files when they are no longer needed"""
+    try:
+        # Only cleanup files that were created in previous sessions
+        temp_dir = tempfile.gettempdir()
+        current_time = time.time()
+        # Look for visualization files that are older than 30 minutes
+        for filename in os.listdir(temp_dir):
+            if filename.startswith('patent_viz_') and filename.endswith('.json'):
+                filepath = os.path.join(temp_dir, filename)
+                # Check if file is older than 30 minutes
+                if current_time - os.path.getmtime(filepath) > 1800:  # 30 minutes in seconds
+                    try:
+                        os.remove(filepath)
+                        print(f"Cleaned up old temporary file: {filepath}")
+                    except Exception as e:
+                        print(f"Error cleaning up temporary file: {e}")
+    except Exception as e:
+        print(f"Error in cleanup: {e}")
+        # Don't raise the exception to prevent request handling failures
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=7860)
