@@ -19,9 +19,10 @@
         .insights-panel {
             background-color: #2d2d2d;
             border-radius: 8px;
-            height: calc(100vh - 40px);
+            height: calc(100vh - 140px);
             overflow-y: auto;
             transition: all 0.3s ease;
+            padding: 2rem;
         }
         .cluster-card {
             background-color: #3d3d3d;
@@ -150,6 +151,13 @@
                 height: 85vh;
             }
         }
+        .innovation-analysis {
+            background-color: #1c2431;
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin-bottom: 2rem;
+            border: 1px solid #4a5568;
+        }
     </style>
 </head>
 <body class="bg-gray-900 text-gray-100 min-h-screen">
@@ -215,7 +223,6 @@
 
     <script>
         let progressEventSource = null;
-
         function startProgressMonitoring() {
             if (progressEventSource) {
                 progressEventSource.close();
@@ -241,14 +248,12 @@
                 }
             };
         }
-
         function stopProgressMonitoring() {
             if (progressEventSource) {
                 progressEventSource.close();
                 progressEventSource = null;
             }
         }
-
         function updateProgress(step, status) {
             const steps = ['search', 'embedding', 'clustering', 'visualization'];
             const stepIndex = steps.indexOf(step);
@@ -314,7 +319,6 @@
                 }
             });
         }
-
         $(document).ready(function() {
             $('#searchForm').on('submit', function(e) {
                 e.preventDefault();
@@ -324,9 +328,7 @@
                     alert('Please enter search keywords');
                     return;
                 }
-
                 console.log('Starting search with keywords:', keywords);
-
                 // Reset and show loading status
                 $('#loading').removeClass('hidden');
                 $('#visualization').empty();
@@ -339,7 +341,6 @@
                 
                 // Start progress monitoring
                 startProgressMonitoring();
-
                 $.ajax({
                     url: '/search',
                     method: 'POST',
@@ -354,23 +355,33 @@
                             alert(response.error);
                             return;
                         }
-
+                        // Reset visualization and insights
+                        $('#visualization').empty();
+                        $('#insights').empty();
+                        $('#innovation-analysis').empty();
                         // Display visualization
                         if (response.visualization) {
-                            console.log('Creating visualization...');
-                            const vizData = JSON.parse(response.visualization);
-                            Plotly.newPlot('visualization', vizData.data, vizData.layout);
-                            
-                            document.getElementById('visualization').on('plotly_click', function(data) {
-                                const link = data.points[0].customdata;
-                                if (link) {
-                                    window.open(link, '_blank');
-                                }
-                            });
+                            console.log('Creating visualization...', response.visualization.slice(0, 100) + '...');
+                            try {
+                                const vizData = JSON.parse(response.visualization);
+                                Plotly.newPlot('visualization', vizData.data, vizData.layout);
+                                
+                                const vizElement = document.getElementById('visualization');
+                                vizElement.on('plotly_click', function(data) {
+                                    if (data.points && data.points[0] && data.points[0].customdata) {
+                                        const link = data.points[0].customdata;
+                                        window.open(link, '_blank');
+                                    }
+                                });
+                                console.log('Visualization created successfully');
+                            } catch (e) {
+                                console.error('Error creating visualization:', e);
+                                $('#visualization').html('<p class="text-red-500">Error creating visualization</p>');
+                            }
                         } else {
                             console.warn('No visualization data received');
+                            $('#visualization').html('<p class="text-yellow-500">No visualization data available</p>');
                         }
-
                         // Display insights
                         if (response.insights) {
                             console.log('Displaying insights...');
@@ -381,7 +392,21 @@
                             console.log('Found innovation subclusters:', innovationSubclusters.length);
                             console.log('Found transitional areas:', transitionalAreas.length);
                             
-                            let insightsHtml = '<div class="grid grid-cols-1 lg:grid-cols-3 gap-6 p-6">';
+                            // Start with Innovation Analysis
+                            let insightsHtml = '';
+                            if (response.innovationAnalysis) {
+                                insightsHtml += `
+                                    <div class="bg-gray-800 p-6 mb-6 rounded-lg">
+                                        <h3 class="text-2xl font-bold mb-4 text-blue-300">Innovation Opportunities Analysis</h3>
+                                        <div class="text-gray-300 whitespace-pre-line">
+                                            ${response.innovationAnalysis}
+                                        </div>
+                                    </div>
+                                `;
+                            }
+                            
+                            // Add the grid for clusters, transitional areas, and underexplored areas
+                            insightsHtml += '<div class="grid grid-cols-1 lg:grid-cols-3 gap-6 p-6">';
                             
                             // Left column: Technology Clusters
                             insightsHtml += '<div class="col-span-1">';
@@ -402,7 +427,6 @@
                                 insightsHtml += '<p class="text-gray-400">No technology clusters identified.</p>';
                             }
                             insightsHtml += '</div>';
-
                             // Middle column: Transitional Areas
                             insightsHtml += '<div class="col-span-1">';
                             insightsHtml += '<h3 class="text-2xl font-bold mb-4 text-orange-400">Transitional Areas</h3>';
@@ -422,10 +446,9 @@
                                 insightsHtml += '<p class="text-gray-400">No transitional areas identified.</p>';
                             }
                             insightsHtml += '</div>';
-
-                            // Right column: Innovation Opportunities
+                            // Right column: Underexplored Areas
                             insightsHtml += '<div class="col-span-1">';
-                            insightsHtml += '<h3 class="text-2xl font-bold mb-4 text-green-400">Innovation Opportunities</h3>';
+                            insightsHtml += '<h3 class="text-2xl font-bold mb-4 text-green-400">Underexplored Areas</h3>';
                             
                             if (innovationSubclusters.length > 0) {
                                 insightsHtml += '<div class="space-y-4">';
@@ -439,16 +462,26 @@
                                 });
                                 insightsHtml += '</div>';
                             } else {
-                                insightsHtml += '<p class="text-gray-400">No significant innovation opportunities identified in this technology space.</p>';
+                                insightsHtml += '<p class="text-gray-400">No significant underexplored areas identified in this technology space.</p>';
                             }
                             insightsHtml += '</div>';
-
                             insightsHtml += '</div>';
                             $('#insights').html(insightsHtml);
                         } else {
                             console.warn('No insights data received');
                         }
-
+                        // Innovation Analysis Section
+                        if (response.innovationAnalysis) {
+                            console.log('Displaying innovation analysis...');
+                            $('#innovation-analysis').html(`
+                                <div class="text-gray-300 whitespace-pre-line bg-gray-800 p-4 rounded-lg mt-6">
+                                    ${response.innovationAnalysis}
+                                </div>
+                            `);
+                        } else {
+                            console.warn('No innovation analysis data received');
+                            $('#innovation-analysis').html('<p class="text-gray-400 mt-6">No innovation analysis available.</p>');
+                        }
                         // Stop progress monitoring and hide loading status
                         console.log('Search completed successfully');
                         stopProgressMonitoring();
