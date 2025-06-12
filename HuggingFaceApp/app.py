@@ -1510,6 +1510,9 @@ def search():
         # Generate innovation analysis from insights
         innovation_analysis = analyze_innovation_opportunities(viz_data['insights'])
         
+        # Store innovation analysis in visualization data for persistence
+        viz_data['innovation_analysis'] = innovation_analysis
+        
         # Save visualization data to persistent storage
         data_path = session['viz_file']
         temp_path = session['temp_viz_file']
@@ -1798,6 +1801,11 @@ def download_insights():
                     print("No insights found in visualization file")
                     return jsonify({'error': 'Invalid insights data - missing insights field'})
                 print(f"Successfully loaded insights data with {len(insights)} insights")
+                
+                # If no analysis in session, try to get it from the visualization data
+                if not analysis and 'innovation_analysis' in viz_data:
+                    analysis = viz_data.get('innovation_analysis')
+                    print("Retrieved innovation analysis from visualization file")
         except Exception as e:
             print(f"Error reading visualization file: {e}")
             return jsonify({'error': f'Failed to load insights: {str(e)}'})
@@ -1828,12 +1836,93 @@ def download_insights():
             fontSize=12,
             spaceAfter=12
         )
+        subheading_style = ParagraphStyle(
+            'CustomSubheading',
+            parent=styles['Heading2'],
+            fontSize=14,
+            spaceAfter=10,
+            textColor=colors.darkblue
+        )
+        opportunity_style = ParagraphStyle(
+            'OpportunityStyle',
+            parent=styles['Normal'],
+            fontSize=12,
+            spaceAfter=5,
+            leftIndent=20,
+            firstLineIndent=0
+        )
+        bullet_style = ParagraphStyle(
+            'BulletStyle',
+            parent=styles['Normal'],
+            fontSize=12,
+            spaceAfter=5,
+            leftIndent=40,
+            firstLineIndent=-20
+        )
         
         # Build the document
         try:
             print("Building PDF document structure...")
             story = []
             story.append(Paragraph("Patent Technology Landscape Analysis", title_style))
+            
+            # Add innovation analysis first if available
+            if analysis:
+                print("Adding innovation opportunities analysis...")
+                story.append(Paragraph("Innovation Opportunities Analysis", heading_style))
+                
+                # Format the innovation analysis for better readability
+                # Look for opportunity patterns in the text
+                analysis_parts = []
+                
+                # Split by "Opportunity" keyword to identify sections
+                import re
+                opportunity_pattern = r'Opportunity\s+\d+:'
+                opportunity_matches = re.split(opportunity_pattern, analysis)
+                
+                # First part may be an introduction
+                if opportunity_matches and opportunity_matches[0].strip():
+                    story.append(Paragraph(opportunity_matches[0].strip(), normal_style))
+                    story.append(Spacer(1, 10))
+                
+                # Process each opportunity section
+                for i in range(1, len(opportunity_matches)):
+                    opp_text = opportunity_matches[i].strip()
+                    opp_title = f"Opportunity {i}:"
+                    story.append(Paragraph(opp_title, subheading_style))
+                    
+                    # Process sections like [Area 1] + [Area 2], Gap, Solution, Impact
+                    opp_lines = opp_text.split('\n')
+                    for j, line in enumerate(opp_lines):
+                        line = line.strip()
+                        if not line:
+                            continue
+                        
+                        # Format the first line (Area combinations) specially
+                        if j == 0:
+                            story.append(Paragraph(line, opportunity_style))
+                        # Look for bullet points (Gap, Solution, Impact)
+                        elif line.startswith('-'):
+                            parts = line.split(':', 1)
+                            if len(parts) == 2:
+                                bullet = parts[0].strip('- ')
+                                content = parts[1].strip()
+                                formatted_line = f"• <b>{bullet}:</b> {content}"
+                                story.append(Paragraph(formatted_line, bullet_style))
+                            else:
+                                story.append(Paragraph(line, bullet_style))
+                        else:
+                            story.append(Paragraph(line, opportunity_style))
+                    
+                    # Add space between opportunities
+                    story.append(Spacer(1, 15))
+                
+                # If we couldn't parse the format, just add the raw text
+                if len(opportunity_matches) <= 1:
+                    story.append(Paragraph(analysis, normal_style))
+                
+                # Add separator
+                story.append(Spacer(1, 20))
             
             # Add clusters
             print("Adding technology clusters section...")
@@ -1870,12 +1959,6 @@ def download_insights():
                     story.append(Spacer(1, 12))
                     underexplored_count += 1
             print(f"Added {underexplored_count} underexplored areas")
-            
-            # Add innovation analysis if available
-            if analysis:
-                print("Adding innovation opportunities analysis...")
-                story.append(Paragraph("Innovation Opportunities Analysis", heading_style))
-                story.append(Paragraph(analysis, normal_style))
             
             # Build PDF
             print("Building final PDF document...")
